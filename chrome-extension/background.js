@@ -1,5 +1,5 @@
 /**
- * Blabby Voice — Background Service Worker
+ * MindMic Voice — Background Service Worker
  * Routes ALL server communication + manages offscreen audio recording
  * Every setting wired end-to-end
  */
@@ -10,8 +10,8 @@ let activeTabId = null;
 let offscreenCloser = null; // timer to auto-close offscreen
 
 async function getServerUrl() {
-  const d = await chrome.storage.local.get("blabby_server_url");
-  return d.blabby_server_url || DEFAULT_SERVER;
+  const d = await chrome.storage.local.get("mindmic_server_url");
+  return d.mindmic_server_url || DEFAULT_SERVER;
 }
 
 // ── Offscreen Document Management ─────────────────────
@@ -51,7 +51,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         });
       })
       .catch((err) => {
-        console.error("[Blabby] Offscreen create failed:", err);
+        console.error("[MindMic] Offscreen create failed:", err);
         if (activeTabId) {
           chrome.tabs
             .sendMessage(activeTabId, {
@@ -150,7 +150,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         const result = await r.json();
         // Save chosen model
-        chrome.storage.local.set({ blabby_model: msg.model });
+        chrome.storage.local.set({ mindmic_model: msg.model });
         sendResponse(result);
       } catch (err) {
         sendResponse({ error: err.message });
@@ -203,19 +203,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 async function transcribeAudio(dataUrl) {
   // Read all settings
   const data = await chrome.storage.local.get([
-    "blabby_language",
-    "blabby_quality",
-    "blabby_mode",
-    "blabby_auto_enter",
-    "blabby_site_settings",
-    "blabby_server_url",
+    "mindmic_language",
+    "mindmic_quality",
+    "mindmic_mode",
+    "mindmic_auto_enter",
+    "mindmic_site_settings",
+    "mindmic_server_url",
   ]);
 
-  const srv = data.blabby_server_url || DEFAULT_SERVER;
-  const lang = data.blabby_language || "en";
-  const quality = data.blabby_quality || "balanced";
-  const mode = data.blabby_mode || "none";
-  const globalAutoEnter = data.blabby_auto_enter || false;
+  const srv = data.mindmic_server_url || DEFAULT_SERVER;
+  const lang = data.mindmic_language || "en";
+  const quality = data.mindmic_quality || "balanced";
+  const mode = data.mindmic_mode || "none";
+  const globalAutoEnter = data.mindmic_auto_enter || false;
 
   // Check per-site auto-enter
   let autoEnter = globalAutoEnter;
@@ -224,7 +224,7 @@ async function transcribeAudio(dataUrl) {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (tab?.url) {
         const host = new URL(tab.url).hostname;
-        const ss = data.blabby_site_settings || {};
+        const ss = data.mindmic_site_settings || {};
         if (ss[host] !== undefined) autoEnter = ss[host];
       }
     } catch (_) {}
@@ -272,12 +272,12 @@ async function transcribeAudio(dataUrl) {
     } catch (err) {
       if (attempt < MAX_RETRIES) {
         console.warn(
-          `[Blabby] Transcription attempt ${attempt + 1} failed, retrying in ${BACKOFF[attempt]}ms:`,
+          `[MindMic] Transcription attempt ${attempt + 1} failed, retrying in ${BACKOFF[attempt]}ms:`,
           err.message
         );
         await new Promise((r) => setTimeout(r, BACKOFF[attempt]));
       } else {
-        console.error("[Blabby] Transcription failed after retries:", err);
+        console.error("[MindMic] Transcription failed after retries:", err);
         if (activeTabId) {
           chrome.tabs
             .sendMessage(activeTabId, {
@@ -308,19 +308,19 @@ chrome.commands.onCommand.addListener((cmd) => {
 chrome.runtime.onInstalled.addListener(() => {
   chrome.storage.local.get(null, (d) => {
     const defs = {
-      blabby_language: "en",
-      blabby_languages: ["en"],
-      blabby_appearance: "dot",
-      blabby_auto_enter: false,
-      blabby_shortcut: "Ctrl+Space",
-      blabby_sound: { onStart: true, onStop: true },
-      blabby_mode: "none",
-      blabby_model: "large-v3-turbo",
-      blabby_quality: "balanced",
-      blabby_mic_device: "default",
-      blabby_server_url: DEFAULT_SERVER,
-      blabby_max_recording: 300,
-      blabby_site_settings: {},
+      mindmic_language: "en",
+      mindmic_languages: ["en"],
+      mindmic_appearance: "dot",
+      mindmic_auto_enter: false,
+      mindmic_shortcut: "Ctrl+Space",
+      mindmic_sound: { onStart: true, onStop: true },
+      mindmic_mode: "none",
+      mindmic_model: "large-v3-turbo",
+      mindmic_quality: "balanced",
+      mindmic_mic_device: "default",
+      mindmic_server_url: DEFAULT_SERVER,
+      mindmic_max_recording: 300,
+      mindmic_site_settings: {},
     };
     const toSet = {};
     for (const [k, v] of Object.entries(defs)) {

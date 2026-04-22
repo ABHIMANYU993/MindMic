@@ -1,5 +1,5 @@
 /**
- * Blabby Voice — Offscreen Document
+ * MindMic Voice — Offscreen Document
  * Handles getUserMedia + MediaRecorder in the extension context.
  * Supports mic device selection and audio level monitoring.
  */

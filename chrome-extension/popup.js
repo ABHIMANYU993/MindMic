@@ -1,4 +1,4 @@
-// Blabby Voice — Popup Script (external file, CSP-safe)
+// MindMic Voice — Popup Script (external file, CSP-safe)
 
 async function init() {
   const dot = document.getElementById("statusDot");
@@ -27,8 +27,8 @@ async function init() {
 
   // Load shortcut
   try {
-    const d = await chrome.storage.local.get("blabby_shortcut");
-    const sc = d.blabby_shortcut || "Ctrl+Space";
+    const d = await chrome.storage.local.get("mindmic_shortcut");
+    const sc = d.mindmic_shortcut || "Ctrl+Space";
     keysEl.innerHTML = "";
     sc.split("+").forEach((k) => {
       const span = document.createElement("span");

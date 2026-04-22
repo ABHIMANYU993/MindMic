@@ -50,7 +50,7 @@ else:
     print("ℹ️  No nvidia packages in this venv — will use CPU")
 
 # ── App ────────────────────────────────────────────────
-app = FastAPI(title="Blabby Voice Server", version="2.0.0")
+app = FastAPI(title="MindMic Voice Server", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,

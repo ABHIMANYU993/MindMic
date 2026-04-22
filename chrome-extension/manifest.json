@@ -1,6 +1,6 @@
 {
     "manifest_version": 3,
-    "name": "Blabby Voice — Local Whisper",
+    "name": "MindMic Voice — Local Whisper",
     "version": "1.0.0",
     "description": "Enterprise voice typing powered by your local Whisper AI. Works everywhere.",
     "permissions": [

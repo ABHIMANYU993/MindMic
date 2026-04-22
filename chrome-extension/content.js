@@ -1,30 +1,30 @@
 /**
- * Blabby Voice — Content Script v2.0
+ * MindMic Voice — Content Script v2.0
  * Production-ready floating overlay · Every setting wired · Shadow DOM isolated
  * Recording via offscreen document (works on ALL sites)
  */
 (function () {
   "use strict";
-  if (document.getElementById("blabby-voice-root")) return;
+  if (document.getElementById("mindmic-voice-root")) return;
 
   /* ══════════════════════════════════════════════════════
      1. STORAGE KEYS & STATE
      ══════════════════════════════════════════════════════ */
   const SK = {
-    position: "blabby_position",
-    language: "blabby_language",
-    languages: "blabby_languages",
-    appearance: "blabby_appearance",
-    autoEnter: "blabby_auto_enter",
-    shortcut: "blabby_shortcut",
-    sound: "blabby_sound",
-    mode: "blabby_mode",
-    model: "blabby_model",
-    quality: "blabby_quality",
-    micDevice: "blabby_mic_device",
-    serverUrl: "blabby_server_url",
-    siteSettings: "blabby_site_settings",
-    maxRecording: "blabby_max_recording",
+    position: "mindmic_position",
+    language: "mindmic_language",
+    languages: "mindmic_languages",
+    appearance: "mindmic_appearance",
+    autoEnter: "mindmic_auto_enter",
+    shortcut: "mindmic_shortcut",
+    sound: "mindmic_sound",
+    mode: "mindmic_mode",
+    model: "mindmic_model",
+    quality: "mindmic_quality",
+    micDevice: "mindmic_mic_device",
+    serverUrl: "mindmic_server_url",
+    siteSettings: "mindmic_site_settings",
+    maxRecording: "mindmic_max_recording",
   };
 
   const state = {
@@ -249,7 +249,7 @@
      6. SHADOW DOM
      ══════════════════════════════════════════════════════ */
   const hostEl = document.createElement("div");
-  hostEl.id = "blabby-voice-root";
+  hostEl.id = "mindmic-voice-root";
   document.documentElement.appendChild(hostEl);
   const shadow = hostEl.attachShadow({ mode: "closed" });
 
@@ -554,7 +554,7 @@
         el.dispatchEvent(new Event("change", { bubbles: true }));
       }
     } catch (err) {
-      console.warn("[Blabby] Insert failed:", err.message);
+      console.warn("[MindMic] Insert failed:", err.message);
     }
   }
 
@@ -686,7 +686,7 @@
     const panel = mk("div", "s-panel");
     const sb = mk("div", "s-sb");
     const logo = mk("div", "s-logo");
-    logo.innerHTML = "<span>🎙️</span> Blabby";
+    logo.innerHTML = "<span>🎙️</span> MindMic";
     sb.appendChild(logo);
 
     const nav = mk("div", "s-nav");
@@ -1212,7 +1212,7 @@
         playSound("start");
       }
       if (msg.action === "recError") {
-        console.warn("[Blabby] Recording error:", msg.error);
+        console.warn("[MindMic] Recording error:", msg.error);
         state.recording = false;
         state.transcribing = false;
         setUI("expanded");

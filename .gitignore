@@ -8,3 +8,4 @@ __pycache__/
 *.pyc
 node_modules/
 .DS_Store
+whisper-server/.venv3.11.test
