@@ -3,6 +3,7 @@ the_real_ui_babbly_ai/
 .git/
 .venv/
 whisper-server/.venv/
+whisper-server/.venv*/
 __pycache__/
 *.pyc
 node_modules/
