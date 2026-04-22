@@ -1,0 +1,17 @@
+/* Host page styles — minimal, just the overlay container */
+#blabby-voice-root {
+    position: fixed !important;
+    z-index: 2147483647 !important;
+    pointer-events: none;
+    top: 0;
+    left: 0;
+    width: 0;
+    height: 0;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: none !important;
+    background: none !important;
+    box-shadow: none !important;
+    font-size: 0 !important;
+    line-height: 0 !important;
+}

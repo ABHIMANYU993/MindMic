@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Blabby Voice</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      width: 300px;
+      background: #0a0a0a;
+      color: #e0e0e0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 13px;
+      padding: 18px;
+    }
+    .hdr { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
+    .hdr-icon { font-size: 26px; }
+    .hdr h1 { font-size: 17px; font-weight: 700; color: #fff; }
+    .hdr p { font-size: 11px; color: #666; margin-top: 2px; }
+    .card {
+      background: #141414;
+      border: 1px solid #1f1f1f;
+      border-radius: 10px;
+      padding: 12px 14px;
+      margin-bottom: 12px;
+    }
+    .status-row { display: flex; align-items: center; gap: 8px; }
+    .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #ef4444; flex-shrink: 0;
+    }
+    .dot.on { background: #22c55e; box-shadow: 0 0 6px rgba(34,197,94,0.4); }
+    .status-label { font-weight: 500; color: #ccc; }
+    .status-detail { font-size: 11px; color: #555; margin-top: 4px; padding-left: 16px; }
+    .shortcut-label { font-size: 11px; color: #555; margin-bottom: 6px; }
+    .keys { display: flex; gap: 6px; }
+    .key {
+      background: #1e1e1e; color: #ccc; padding: 4px 10px;
+      border-radius: 5px; font-size: 12px; font-weight: 600;
+      border: 1px solid #2a2a2a;
+    }
+    .btn {
+      width: 100%; padding: 10px; background: #3b82f6; color: #fff;
+      border: none; border-radius: 9px; font-size: 13px; font-weight: 600;
+      cursor: pointer; font-family: inherit; transition: background 0.2s;
+    }
+    .btn:hover { background: #2563eb; }
+    .foot { text-align: center; margin-top: 14px; font-size: 11px; color: #444; }
+  </style>
+</head>
+<body>
+  <div class="hdr">
+    <span class="hdr-icon">🎙️</span>
+    <div>
+      <h1>Blabby Voice</h1>
+      <p>Local Whisper AI • Voice Type Anywhere</p>
+    </div>
+  </div>
+  <div class="card">
+    <div class="status-row">
+      <span class="dot" id="statusDot"></span>
+      <span class="status-label" id="statusLabel">Checking…</span>
+    </div>
+    <div class="status-detail" id="statusDetail">http://127.0.0.1:8000</div>
+  </div>
+  <div class="card">
+    <div class="shortcut-label">Toggle voice typing</div>
+    <div class="keys"><span class="key">Ctrl</span><span class="key">Space</span></div>
+  </div>
+  <button class="btn" id="openSettings">Open Settings</button>
+  <div class="foot">Powered by faster-whisper on your machine</div>
+  <script src="popup.js"></script>
+</body>
+</html>
