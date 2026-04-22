@@ -346,7 +346,8 @@
      9. POSITIONING + SHOW/HIDE
      ══════════════════════════════════════════════════════ */
   function applyPos() {
-    wrap.style.left = state.pos.x + "px";
+    wrap.style.left = "auto";
+    wrap.style.right = (innerWidth - state.pos.x - 14) + "px";
     wrap.style.top = state.pos.y + "px";
   }
 
@@ -1303,18 +1304,17 @@
   opacity:0;transition:opacity .3s ease;
   font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
   font-size:13px;color:#ddd;line-height:1.4;
+  display:flex;flex-direction:column;align-items:flex-end;
 }
 .wrap.on{opacity:1}
 
 /* ── Bar ── */
 .bar{
   display:flex;align-items:center;gap:0;
-  flex-direction:row-reverse;
   background:#000;border-radius:50px;padding:0;
   cursor:grab;overflow:hidden;
   transition:all .35s cubic-bezier(.4,0,.2,1);
   height:40px;width:40px;justify-content:center;
-  margin-left:auto;
 }
 .bar:active{cursor:grabbing}
 
@@ -1354,7 +1354,6 @@
 /* ── Items ── */
 .items{
   display:flex;align-items:center;gap:2px;
-  flex-direction:row-reverse;
   opacity:0;max-width:0;overflow:hidden;
   transition:all .35s cubic-bezier(.4,0,.2,1);white-space:nowrap;
 }
