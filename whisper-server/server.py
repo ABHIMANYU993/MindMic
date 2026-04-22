@@ -9,49 +9,45 @@ import sys
 import re
 import time
 
-# ── CUDA Library Path Fix ──────────────────────────────
-# Auto-detect nvidia libs in the current venv + known system paths
-import site as _site
+# ── CUDA Library Pre-Loading ───────────────────────────
+# ONLY looks inside the active Python interpreter's venv.
+# No hardcoded pyenv paths. No system paths. Just what's installed.
+import ctypes
+import glob
 
-_cuda_search = [
-    "/usr/local/cuda/lib64",
-    "/opt/cuda/lib64",
-]
+_venv_sp = os.path.join(
+    sys.prefix, "lib",
+    f"python{sys.version_info.major}.{sys.version_info.minor}",
+    "site-packages", "nvidia",
+)
+_cuda_ok = False
 
-# Add current venv/site-packages nvidia paths (works regardless of which venv)
-for _sp in _site.getsitepackages() + [_site.getusersitepackages()]:
-    _nv = os.path.join(_sp, "nvidia")
-    if os.path.isdir(_nv):
-        for _pkg in os.listdir(_nv):
-            _lib = os.path.join(_nv, _pkg, "lib")
-            if os.path.isdir(_lib):
-                _cuda_search.insert(0, _lib)
-
-# Also check pyenv paths as fallback
-for _pyver in ["3.12.9", "3.11.9", "3.10.14"]:
-    _p = os.path.expanduser(f"~/.pyenv/versions/{_pyver}/lib/python{_pyver[:4]}/site-packages/nvidia/cublas/lib")
-    if os.path.isdir(_p):
-        _cuda_search.append(_p)
-
-_found_cuda = False
-for _p in _cuda_search:
-    if os.path.isdir(_p):
-        os.environ["LD_LIBRARY_PATH"] = _p + ":" + os.environ.get("LD_LIBRARY_PATH", "")
-        _found_cuda = True
-        print(f"🔧 Added to LD_LIBRARY_PATH: {_p}")
-
-if _found_cuda:
-    # Force reload of ctypes lib search paths
-    import ctypes
-    try:
-        ctypes.CDLL("libcublas.so.12")
-        print("✅ libcublas.so.12 found")
-    except OSError:
-        print("⚠️  libcublas.so.12 not loadable — will fallback to CPU if needed")
+if os.path.isdir(_venv_sp):
+    # Pre-load CUDA shared libs BEFORE importing faster_whisper/ctranslate2.
+    # Setting LD_LIBRARY_PATH via os.environ does NOT work after process start
+    # because the dynamic linker caches it. ctypes.CDLL is the real fix.
+    _libs_to_load = [
+        "cublas/lib/libcublas.so.*",
+        "cublas/lib/libcublasLt.so.*",
+        "cudnn/lib/libcudnn.so.*",
+        "cuda_nvrtc/lib/libnvrtc.so.*",
+        "cuda_runtime/lib/libcudart.so.*",
+    ]
+    _loaded = []
+    for _pat in _libs_to_load:
+        for _f in sorted(glob.glob(os.path.join(_venv_sp, _pat))):
+            try:
+                ctypes.CDLL(_f, mode=ctypes.RTLD_GLOBAL)
+                _loaded.append(os.path.basename(_f))
+            except OSError:
+                pass
+    if _loaded:
+        _cuda_ok = True
+        print(f"✅ CUDA libs preloaded from venv: {', '.join(_loaded)}")
+    else:
+        print("⚠️  nvidia packages installed but no CUDA libs loadable")
 else:
-    print("ℹ️  No CUDA libraries found — will use CPU")
-
-import ctypes.util  # noqa: E402
+    print("ℹ️  No nvidia packages in this venv — will use CPU")
 
 # ── App ────────────────────────────────────────────────
 app = FastAPI(title="Blabby Voice Server", version="2.0.0")
