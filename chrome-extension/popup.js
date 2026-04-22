@@ -1,16 +1,21 @@
 // Blabby Voice — Popup Script (external file, CSP-safe)
 
-async function checkServer() {
+async function init() {
   const dot = document.getElementById("statusDot");
   const label = document.getElementById("statusLabel");
   const detail = document.getElementById("statusDetail");
+  const keysEl = document.getElementById("shortcutKeys");
+
+  // Check server
   try {
     const resp = await chrome.runtime.sendMessage({ action: "healthCheck" });
     if (resp && resp.online) {
       dot.classList.add("on");
       label.textContent = "Server Online";
       detail.textContent =
-        "Model: " + (resp.model || "whisper") + " • http://127.0.0.1:8000";
+        "Model: " + (resp.model || "whisper") +
+        " · " + (resp.device || "gpu") +
+        " · http://127.0.0.1:8000";
     } else {
       throw new Error();
     }
@@ -19,9 +24,22 @@ async function checkServer() {
     label.textContent = "Server Offline";
     detail.textContent = "Start: cd whisper-server && python server.py";
   }
+
+  // Load shortcut
+  try {
+    const d = await chrome.storage.local.get("blabby_shortcut");
+    const sc = d.blabby_shortcut || "Ctrl+Space";
+    keysEl.innerHTML = "";
+    sc.split("+").forEach((k) => {
+      const span = document.createElement("span");
+      span.className = "key";
+      span.textContent = k;
+      keysEl.appendChild(span);
+    });
+  } catch {}
 }
 
-checkServer();
+init();
 
 document.getElementById("openSettings").addEventListener("click", () => {
   chrome.runtime.sendMessage({ action: "openSettings" });
