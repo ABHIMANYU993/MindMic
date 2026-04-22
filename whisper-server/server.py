@@ -10,24 +10,48 @@ import re
 import time
 
 # ── CUDA Library Path Fix ──────────────────────────────
+# Auto-detect nvidia libs in the current venv + known system paths
+import site as _site
+
 _cuda_search = [
-    os.path.expanduser("~/.pyenv/versions/3.12.9/lib/python3.12/site-packages/nvidia/cublas/lib"),
-    os.path.expanduser("~/.pyenv/versions/3.11.9/lib/python3.11/site-packages/nvidia/cublas/lib"),
     "/usr/local/cuda/lib64",
     "/opt/cuda/lib64",
 ]
+
+# Add current venv/site-packages nvidia paths (works regardless of which venv)
+for _sp in _site.getsitepackages() + [_site.getusersitepackages()]:
+    _nv = os.path.join(_sp, "nvidia")
+    if os.path.isdir(_nv):
+        for _pkg in os.listdir(_nv):
+            _lib = os.path.join(_nv, _pkg, "lib")
+            if os.path.isdir(_lib):
+                _cuda_search.insert(0, _lib)
+
+# Also check pyenv paths as fallback
+for _pyver in ["3.12.9", "3.11.9", "3.10.14"]:
+    _p = os.path.expanduser(f"~/.pyenv/versions/{_pyver}/lib/python{_pyver[:4]}/site-packages/nvidia/cublas/lib")
+    if os.path.isdir(_p):
+        _cuda_search.append(_p)
+
+_found_cuda = False
 for _p in _cuda_search:
     if os.path.isdir(_p):
         os.environ["LD_LIBRARY_PATH"] = _p + ":" + os.environ.get("LD_LIBRARY_PATH", "")
-        _nvidia_base = os.path.dirname(os.path.dirname(_p))
-        if os.path.isdir(_nvidia_base):
-            for _subdir in os.listdir(_nvidia_base):
-                _lib = os.path.join(_nvidia_base, _subdir, "lib")
-                if os.path.isdir(_lib):
-                    os.environ["LD_LIBRARY_PATH"] = _lib + ":" + os.environ.get("LD_LIBRARY_PATH", "")
-        break
+        _found_cuda = True
+        print(f"🔧 Added to LD_LIBRARY_PATH: {_p}")
 
-import ctypes.util  # noqa: E402 — must be after LD_LIBRARY_PATH
+if _found_cuda:
+    # Force reload of ctypes lib search paths
+    import ctypes
+    try:
+        ctypes.CDLL("libcublas.so.12")
+        print("✅ libcublas.so.12 found")
+    except OSError:
+        print("⚠️  libcublas.so.12 not loadable — will fallback to CPU if needed")
+else:
+    print("ℹ️  No CUDA libraries found — will use CPU")
+
+import ctypes.util  # noqa: E402
 
 # ── App ────────────────────────────────────────────────
 app = FastAPI(title="Blabby Voice Server", version="2.0.0")
@@ -207,16 +231,24 @@ async def transcribe(
 
     except RuntimeError as e:
         err = str(e)
-        if "libcublas" in err or "cuda" in err.lower():
-            print(f"⚠️  CUDA runtime error, reloading on CPU: {err}")
+        if "libcublas" in err or "cuda" in err.lower() or "cublas" in err.lower():
+            print(f"⚠️  CUDA runtime error, FORCING CPU fallback: {err}")
             try:
-                load_model(model_name)
-                # Retry
-                segments, info = model.transcribe(tmp_path, language=lang, beam_size=3)
+                # Force CPU directly — do NOT call load_model() which tries CUDA first!
+                model = WhisperModel(model_name, device="cpu", compute_type="int8")
+                device_used = "cpu"
+                print(f"✅ Forced CPU reload of '{model_name}'")
+                # Retry transcription on CPU
+                segments, info = model.transcribe(
+                    tmp_path, language=lang, beam_size=3,
+                    vad_filter=True, condition_on_previous_text=False,
+                )
                 text = " ".join(seg.text for seg in segments).strip()
+                if mode == "command" and text:
+                    text = process_voice_commands(text)
                 return {"text": text, "language": info.language, "duration": round(info.duration, 2)}
             except Exception as e2:
-                return JSONResponse(status_code=500, content={"error": f"Retry failed: {e2}"})
+                return JSONResponse(status_code=500, content={"error": f"CPU fallback failed: {e2}"})
         return JSONResponse(status_code=500, content={"error": err})
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
