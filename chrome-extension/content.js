@@ -1,36 +1,51 @@
 /**
- * Blabby Voice — Content Script
- * Floating overlay · Shadow DOM isolated · Never touches host DOM
- * Recording via offscreen document (works on ALL sites regardless of CSP)
+ * Blabby Voice — Content Script v2.0
+ * Production-ready floating overlay · Every setting wired · Shadow DOM isolated
+ * Recording via offscreen document (works on ALL sites)
  */
 (function () {
   "use strict";
   if (document.getElementById("blabby-voice-root")) return;
 
   /* ══════════════════════════════════════════════════════
-     1. CONSTANTS & STATE
+     1. STORAGE KEYS & STATE
      ══════════════════════════════════════════════════════ */
   const SK = {
     position: "blabby_position",
     language: "blabby_language",
+    languages: "blabby_languages",
     appearance: "blabby_appearance",
     autoEnter: "blabby_auto_enter",
     shortcut: "blabby_shortcut",
     sound: "blabby_sound",
+    mode: "blabby_mode",
+    model: "blabby_model",
+    quality: "blabby_quality",
+    micDevice: "blabby_mic_device",
+    serverUrl: "blabby_server_url",
     siteSettings: "blabby_site_settings",
+    maxRecording: "blabby_max_recording",
   };
 
   const state = {
     visible: false,
-    ui: "idle",
+    ui: "idle", // idle | expanded | recording | transcribing
     recording: false,
     transcribing: false,
     serverOnline: false,
+    // Settings (synced with storage)
     language: "en",
+    languages: ["en"],
     shortcut: "Ctrl+Space",
     autoEnter: false,
     sound: { onStart: true, onStop: true },
-    appearance: "dot",
+    appearance: "dot", // dot | visible | hidden | minimal
+    mode: "none", // none | punctuation | command
+    model: "large-v3-turbo",
+    quality: "balanced",
+    micDevice: "default",
+    maxRecording: 300,
+    // UI state
     dragging: false,
     dragMoved: false,
     dragOffset: { x: 0, y: 0 },
@@ -41,10 +56,13 @@
     siteAutoEnter: false,
     shortcutListening: false,
     pos: { x: 100, y: 300 },
+    audioLevel: 0,
+    recStartTime: 0,
+    modelLoading: false,
   };
 
   /* ══════════════════════════════════════════════════════
-     2. SETTINGS
+     2. SETTINGS LOAD/SAVE
      ══════════════════════════════════════════════════════ */
   function loadSettings() {
     return new Promise((r) => {
@@ -52,10 +70,16 @@
       chrome.storage.local.get(Object.values(SK), (d) => {
         if (d[SK.position]) state.pos = d[SK.position];
         if (d[SK.language]) state.language = d[SK.language];
+        if (d[SK.languages]) state.languages = d[SK.languages];
         if (d[SK.appearance]) state.appearance = d[SK.appearance];
         if (d[SK.autoEnter] !== undefined) state.autoEnter = d[SK.autoEnter];
         if (d[SK.shortcut]) state.shortcut = d[SK.shortcut];
         if (d[SK.sound]) state.sound = d[SK.sound];
+        if (d[SK.mode]) state.mode = d[SK.mode];
+        if (d[SK.model]) state.model = d[SK.model];
+        if (d[SK.quality]) state.quality = d[SK.quality];
+        if (d[SK.micDevice]) state.micDevice = d[SK.micDevice];
+        if (d[SK.maxRecording]) state.maxRecording = d[SK.maxRecording];
         const host = location.hostname;
         const ss = d[SK.siteSettings] || {};
         if (ss[host] !== undefined) state.siteAutoEnter = ss[host];
@@ -63,6 +87,7 @@
       });
     });
   }
+
   function save(k, v) {
     chrome?.storage?.local?.set({ [k]: v });
   }
@@ -87,13 +112,9 @@
     try {
       if (el.isContentEditable) {
         const sel = window.getSelection();
-        if (sel && sel.rangeCount > 0)
-          state.savedRange = sel.getRangeAt(0).cloneRange();
+        if (sel && sel.rangeCount > 0) state.savedRange = sel.getRangeAt(0).cloneRange();
       } else {
-        state.savedCursor = {
-          s: el.selectionStart ?? 0,
-          e: el.selectionEnd ?? 0,
-        };
+        state.savedCursor = { s: el.selectionStart ?? 0, e: el.selectionEnd ?? 0 };
       }
     } catch (_) {}
   }
@@ -142,7 +163,90 @@
   }
 
   /* ══════════════════════════════════════════════════════
-     4. SHADOW DOM
+     4. VOICE COMMAND PROCESSING (client-side, fast)
+     ══════════════════════════════════════════════════════ */
+  const VOICE_CMDS = [
+    [/\bnew line\b/gi, "\n"],
+    [/\bnew paragraph\b/gi, "\n\n"],
+    [/\bperiod\b/gi, "."],
+    [/\bfull stop\b/gi, "."],
+    [/\bcomma\b/gi, ","],
+    [/\bquestion mark\b/gi, "?"],
+    [/\bexclamation mark\b/gi, "!"],
+    [/\bexclamation point\b/gi, "!"],
+    [/\bcolon\b/gi, ":"],
+    [/\bsemicolon\b/gi, ";"],
+    [/\bdash\b/gi, "—"],
+    [/\bhyphen\b/gi, "-"],
+    [/\bopen quote\b/gi, '"'],
+    [/\bclose quote\b/gi, '"'],
+    [/\bopen parenthesis\b/gi, "("],
+    [/\bclose parenthesis\b/gi, ")"],
+    [/\bspace\b/gi, " "],
+    [/\btab\b/gi, "\t"],
+  ];
+
+  function processVoiceCommands(text) {
+    let r = text;
+    for (const [re, rep] of VOICE_CMDS) r = r.replace(re, rep);
+    r = r.replace(/\s+([.,!?;:)\]])/g, "$1");
+    r = r.replace(/([\[(])\s+/g, "$1");
+    return r.trim();
+  }
+
+  /* ══════════════════════════════════════════════════════
+     5. AUTO-ENTER — Smart Mode
+     ══════════════════════════════════════════════════════ */
+  const SEND_SELECTORS = {
+    "chat.openai.com": '[data-testid="send-button"], button[aria-label="Send prompt"]',
+    "chatgpt.com": '[data-testid="send-button"], button[aria-label="Send prompt"]',
+    "gemini.google.com": 'button[aria-label="Send message"], button.send-button',
+    "grok.com": 'button[aria-label="Send"], button[aria-label="Submit"]',
+    "chat.deepseek.com": 'div[class*="send"] button, button[class*="send"]',
+  };
+
+  function isChat() {
+    const h = location.hostname;
+    return Object.keys(SEND_SELECTORS).some((k) => h.includes(k));
+  }
+
+  function doAutoEnter() {
+    const el = state.lastInput;
+    if (!el) return;
+    const host = location.hostname;
+
+    // Try site-specific send button
+    for (const [domain, sel] of Object.entries(SEND_SELECTORS)) {
+      if (host.includes(domain)) {
+        // Small delay to let UI react to text insertion
+        setTimeout(() => {
+          const btn = document.querySelector(sel);
+          if (btn) {
+            btn.click();
+            return;
+          }
+          // Fallback: dispatch Enter key
+          dispatchEnterKey(el);
+        }, 150);
+        return;
+      }
+    }
+
+    // Generic: only auto-enter on chat-like sites, not search/editors
+    if (el.isContentEditable || el.tagName === "TEXTAREA") {
+      setTimeout(() => dispatchEnterKey(el), 100);
+    }
+  }
+
+  function dispatchEnterKey(el) {
+    const opts = { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true };
+    el.dispatchEvent(new KeyboardEvent("keydown", opts));
+    el.dispatchEvent(new KeyboardEvent("keypress", opts));
+    el.dispatchEvent(new KeyboardEvent("keyup", opts));
+  }
+
+  /* ══════════════════════════════════════════════════════
+     6. SHADOW DOM
      ══════════════════════════════════════════════════════ */
   const hostEl = document.createElement("div");
   hostEl.id = "blabby-voice-root";
@@ -154,7 +258,7 @@
   shadow.appendChild(css);
 
   /* ══════════════════════════════════════════════════════
-     5. BUILD TOOLBAR
+     7. TOOLBAR
      ══════════════════════════════════════════════════════ */
   const IC = {
     mic: '<svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>',
@@ -163,43 +267,47 @@
     x: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
   };
 
-  const wrap = document.createElement("div");
-  wrap.className = "wrap";
+  const wrap = mk("div", "wrap");
   wrap.style.display = "none";
 
-  const bar = document.createElement("div");
-  bar.className = "bar idle";
+  const bar = mk("div", "bar idle");
+  const items = mk("div", "items");
 
-  const items = document.createElement("div");
-  items.className = "items";
-
-  const langEl = document.createElement("span");
-  langEl.className = "lang";
+  const langEl = mk("span", "lang");
   langEl.textContent = state.language;
 
-  const micBtn = document.createElement("button");
-  micBtn.className = "btn mic";
+  const micBtn = mk("button", "btn mic");
   micBtn.innerHTML = IC.mic;
 
-  const stopBtn = document.createElement("button");
-  stopBtn.className = "btn stop hide";
+  const stopBtn = mk("button", "btn stop hide");
   stopBtn.innerHTML = IC.stop;
 
-  const dotsBtn = document.createElement("button");
-  dotsBtn.className = "btn";
+  // Waveform bars (during recording)
+  const waveEl = mk("div", "wave hide");
+  for (let i = 0; i < 5; i++) waveEl.appendChild(mk("span", "wave-bar"));
+
+  // Transcribing indicator
+  const spinEl = mk("div", "spin hide");
+  spinEl.innerHTML = '<span class="spin-d">.</span><span class="spin-d">.</span><span class="spin-d">.</span>';
+
+  const dotsBtn = mk("button", "btn");
   dotsBtn.innerHTML = IC.dots;
 
-  const closeBtn = document.createElement("button");
-  closeBtn.className = "btn sm";
+  const closeBtn = mk("button", "btn sm");
   closeBtn.innerHTML = IC.x;
 
-  items.append(langEl, micBtn, stopBtn, dotsBtn, closeBtn);
+  items.append(langEl, micBtn, stopBtn, waveEl, spinEl, dotsBtn, closeBtn);
   bar.appendChild(items);
   wrap.appendChild(bar);
+
+  // Toast container
+  const toastEl = mk("div", "toast-wrap");
+  wrap.appendChild(toastEl);
+
   shadow.appendChild(wrap);
 
   /* ══════════════════════════════════════════════════════
-     6. PREVENT FOCUS STEAL
+     8. PREVENT FOCUS STEAL + DRAG
      ══════════════════════════════════════════════════════ */
   wrap.addEventListener(
     "mousedown",
@@ -207,8 +315,7 @@
       saveCursor();
       e.preventDefault();
       e.stopPropagation();
-
-      if (!e.target.closest("button")) {
+      if (!e.target.closest("button") && !e.target.closest(".wave")) {
         state.dragging = true;
         state.dragMoved = false;
         state.dragOffset = {
@@ -236,7 +343,7 @@
   });
 
   /* ══════════════════════════════════════════════════════
-     7. POSITIONING + SHOW/HIDE
+     9. POSITIONING + SHOW/HIDE
      ══════════════════════════════════════════════════════ */
   function applyPos() {
     wrap.style.left = state.pos.x + "px";
@@ -247,10 +354,7 @@
     const r = el.getBoundingClientRect();
     let x = r.left - 45;
     let y = r.top + Math.min(r.height, 80) / 2 - 7;
-    if (x < 15) {
-      x = r.left + 10;
-      y = r.bottom + 8;
-    }
+    if (x < 15) { x = r.left + 10; y = r.bottom + 8; }
     x = Math.max(8, Math.min(x, innerWidth - 50));
     y = Math.max(8, Math.min(y, innerHeight - 50));
     state.pos = { x, y };
@@ -261,12 +365,15 @@
     if (state.visible) return;
     state.visible = true;
     wrap.style.display = "";
-    wrap.offsetHeight; // force reflow
+    wrap.offsetHeight;
     wrap.classList.add("on");
+    // Apply appearance mode
+    if (state.appearance === "visible") setUI("expanded");
   }
 
   function hide() {
     if (!state.visible) return;
+    if (state.recording || state.transcribing) return; // don't hide while active
     state.visible = false;
     wrap.classList.remove("on");
     setTimeout(() => {
@@ -285,8 +392,10 @@
       if (isInput(e.target)) {
         state.lastInput = e.target;
         saveCursor();
-        posNear(e.target);
-        show();
+        if (state.appearance !== "minimal") {
+          posNear(e.target);
+          show();
+        }
       }
     },
     true
@@ -298,9 +407,7 @@
       clearTimeout(hideTimer);
       hideTimer = setTimeout(() => {
         const a = document.activeElement;
-        if (!isInput(a) && !state.recording && !state.transcribing) {
-          hide();
-        }
+        if (!isInput(a) && !state.recording && !state.transcribing) hide();
       }, 400);
     },
     true
@@ -311,35 +418,34 @@
   });
 
   /* ══════════════════════════════════════════════════════
-     8. UI STATE MACHINE
+     10. UI STATE MACHINE
      ══════════════════════════════════════════════════════ */
   let leaveTimer = null;
+  let recTimer = null; // max recording timer
 
   function setUI(s) {
     state.ui = s;
     bar.className = "bar " + s;
-    if (s === "recording") {
-      micBtn.classList.add("hide");
-      stopBtn.classList.remove("hide");
-      dotsBtn.classList.add("hide");
-    } else {
-      micBtn.classList.remove("hide");
-      stopBtn.classList.add("hide");
-      dotsBtn.classList.remove("hide");
-    }
-    if (s !== "expanded" && s !== "recording") closeMenu();
+
+    micBtn.classList.toggle("hide", s === "recording" || s === "transcribing");
+    stopBtn.classList.toggle("hide", s !== "recording");
+    waveEl.classList.toggle("hide", s !== "recording");
+    spinEl.classList.toggle("hide", s !== "transcribing");
+    dotsBtn.classList.toggle("hide", s === "recording" || s === "transcribing");
+
+    if (s !== "expanded" && s !== "recording" && s !== "transcribing") closeMenu();
   }
 
   bar.addEventListener("mouseenter", () => {
     clearTimeout(leaveTimer);
-    if (state.ui === "idle") setUI("expanded");
+    if (state.ui === "idle" && state.appearance !== "minimal") setUI("expanded");
   });
 
   bar.addEventListener("mouseleave", () => {
     clearTimeout(leaveTimer);
     if (state.ui === "expanded" && !menuEl) {
       leaveTimer = setTimeout(() => {
-        if (state.ui === "expanded" && !menuEl) setUI("idle");
+        if (state.ui === "expanded" && !menuEl && state.appearance !== "visible") setUI("idle");
       }, 900);
     }
   });
@@ -352,17 +458,10 @@
   });
 
   /* ══════════════════════════════════════════════════════
-     9. RECORDING — via offscreen document
-     No getUserMedia here. All recording in extension context.
+     11. RECORDING
      ══════════════════════════════════════════════════════ */
-  micBtn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    startRec();
-  });
-  stopBtn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    stopRec();
-  });
+  micBtn.addEventListener("click", (e) => { e.stopPropagation(); startRec(); });
+  stopBtn.addEventListener("click", (e) => { e.stopPropagation(); stopRec(); });
   closeBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     if (state.recording) stopRec();
@@ -372,17 +471,29 @@
   function startRec() {
     if (state.recording || state.transcribing) return;
     saveCursor();
-    // Send to background → offscreen document
-    chrome.runtime.sendMessage({ action: "startRec", language: state.language });
-    // UI update happens when we get "recStarted" back
+    state.recStartTime = Date.now();
+    chrome.runtime.sendMessage({
+      action: "startRec",
+      deviceId: state.micDevice,
+    });
+
+    // Max recording timer
+    clearTimeout(recTimer);
+    recTimer = setTimeout(() => {
+      if (state.recording) {
+        showToast("Max recording time reached", "warn");
+        stopRec();
+      }
+    }, state.maxRecording * 1000);
   }
 
   function stopRec() {
     if (!state.recording) return;
+    clearTimeout(recTimer);
     chrome.runtime.sendMessage({ action: "stopRec" });
     state.recording = false;
     state.transcribing = true;
-    setUI("expanded");
+    setUI("transcribing");
     playSound("stop");
   }
 
@@ -394,17 +505,29 @@
         posNear(state.lastInput);
         show();
       }
+      if (state.appearance === "minimal" && state.lastInput) {
+        // For minimal mode, show a tiny indicator
+        wrap.style.display = "";
+        wrap.classList.add("on");
+      }
       if (state.ui === "idle") setUI("expanded");
       startRec();
     }
   }
 
   /* ══════════════════════════════════════════════════════
-     10. TEXT INSERTION
+     12. TEXT INSERTION
      ══════════════════════════════════════════════════════ */
   function insertText(text) {
     const el = state.lastInput;
     if (!el) return;
+
+    // Process voice commands if mode is "command"
+    let finalText = text;
+    if (state.mode === "command") {
+      finalText = processVoiceCommands(finalText);
+    }
+
     try {
       if (el.isContentEditable) {
         el.focus();
@@ -413,22 +536,19 @@
           sel.removeAllRanges();
           sel.addRange(state.savedRange);
         }
-        document.execCommand("insertText", false, text);
+        document.execCommand("insertText", false, finalText);
         el.dispatchEvent(new Event("input", { bubbles: true }));
       } else {
         el.focus();
         const s = state.savedCursor.s;
         const e = state.savedCursor.e;
-        const proto =
-          el.tagName === "TEXTAREA"
-            ? HTMLTextAreaElement.prototype
-            : HTMLInputElement.prototype;
+        const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
         const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
         const before = el.value.substring(0, s);
         const after = el.value.substring(e);
-        if (setter) setter.call(el, before + text + after);
-        else el.value = before + text + after;
-        el.selectionStart = el.selectionEnd = s + text.length;
+        if (setter) setter.call(el, before + finalText + after);
+        else el.value = before + finalText + after;
+        el.selectionStart = el.selectionEnd = s + finalText.length;
         el.dispatchEvent(new Event("input", { bubbles: true }));
         el.dispatchEvent(new Event("change", { bubbles: true }));
       }
@@ -438,7 +558,22 @@
   }
 
   /* ══════════════════════════════════════════════════════
-     11. MENU
+     13. TOAST NOTIFICATIONS
+     ══════════════════════════════════════════════════════ */
+  function showToast(msg, type = "info") {
+    const t = mk("div", "toast " + type);
+    t.textContent = msg;
+    toastEl.appendChild(t);
+    t.offsetHeight; // reflow
+    t.classList.add("show");
+    setTimeout(() => {
+      t.classList.remove("show");
+      setTimeout(() => t.remove(), 300);
+    }, 3000);
+  }
+
+  /* ══════════════════════════════════════════════════════
+     14. MENU
      ══════════════════════════════════════════════════════ */
   let menuBg = null;
   let menuEl = null;
@@ -451,11 +586,7 @@
   function openMenu() {
     closeMenu();
     menuBg = mk("div", "menu-bg");
-    menuBg.addEventListener("mousedown", (ev) => {
-      ev.preventDefault();
-      ev.stopPropagation();
-      closeMenu();
-    });
+    menuBg.addEventListener("mousedown", (ev) => { ev.preventDefault(); ev.stopPropagation(); closeMenu(); });
 
     menuEl = mk("div", "menu");
     menuEl.addEventListener("mousedown", (ev) => ev.preventDefault());
@@ -472,10 +603,7 @@
     ico.src = "https://www.google.com/s2/favicons?domain=" + location.hostname + "&sz=32";
     ico.onerror = () => (ico.style.display = "none");
     const name = mk("span", "menu-name");
-    name.textContent =
-      location.hostname.length > 18
-        ? location.hostname.slice(0, 16) + "…"
-        : location.hostname;
+    name.textContent = location.hostname.length > 18 ? location.hostname.slice(0, 16) + "…" : location.hostname;
 
     const pill = mk("div", "pill" + (state.siteAutoEnter ? " on" : ""));
     pill.innerHTML = '<span class="pill-x">×</span> auto-enter';
@@ -492,15 +620,29 @@
     hdr.append(ico, name, pill);
     menuEl.append(hdr, mk("div", "sep"));
 
+    // Mode selector in menu
     const mt = mk("div", "menu-title");
-    mt.textContent = "Modes";
-    menuEl.append(mt, mItem("⊘", "No mode"), mk("div", "sep"));
-    menuEl.appendChild(
-      mItem("⚙", "Settings", () => {
+    mt.textContent = "Mode";
+    menuEl.appendChild(mt);
+
+    const modes = [
+      ["none", "⊘", "No mode"],
+      ["punctuation", "✦", "Punctuation"],
+      ["command", "⌘", "Commands"],
+    ];
+    modes.forEach(([id, ico, label]) => {
+      const item = mItem(ico, label, () => {
+        state.mode = id;
+        save(SK.mode, id);
         closeMenu();
-        openSettings();
-      })
-    );
+        showToast("Mode: " + label);
+      });
+      if (state.mode === id) item.classList.add("active");
+      menuEl.appendChild(item);
+    });
+
+    menuEl.appendChild(mk("div", "sep"));
+    menuEl.appendChild(mItem("⚙", "Settings", () => { closeMenu(); openSettings(); }));
 
     shadow.append(menuBg, menuEl);
   }
@@ -530,16 +672,14 @@
   }
 
   /* ══════════════════════════════════════════════════════
-     12. SETTINGS
+     15. SETTINGS
      ══════════════════════════════════════════════════════ */
   let settingsEl = null;
 
   function openSettings() {
     if (settingsEl) return;
     settingsEl = mk("div", "s-overlay");
-    settingsEl.addEventListener("click", (e) => {
-      if (e.target === settingsEl) closeSettings();
-    });
+    settingsEl.addEventListener("click", (e) => { if (e.target === settingsEl) closeSettings(); });
     settingsEl.addEventListener("mousedown", (e) => e.stopPropagation());
 
     const panel = mk("div", "s-panel");
@@ -575,7 +715,7 @@
 
     const foot = mk("div", "s-foot");
     foot.appendChild(mk("div", "sep"));
-    ["💡 Feature request", "🐛 Report a Bug"].forEach((t) => {
+    ["💡 Feature request", "🐛 Report a Bug", "🗺️ Roadmap"].forEach((t) => {
       const b = mk("button", "s-foot-btn");
       b.textContent = t;
       foot.appendChild(b);
@@ -600,20 +740,14 @@
     cb.textContent = "×";
     cb.addEventListener("click", closeSettings);
     c.appendChild(cb);
-
     const fn = {
-      general: tabGeneral,
-      transcription: tabTranscription,
-      shortcut: tabShortcut,
-      languages: tabLanguages,
-      modes: tabModes,
-      appearance: tabAppearance,
-      sound: tabSound,
+      general: tabGeneral, transcription: tabTranscription, shortcut: tabShortcut,
+      languages: tabLanguages, modes: tabModes, appearance: tabAppearance, sound: tabSound,
     };
     (fn[state.settingsTab] || tabGeneral)(c);
   }
 
-  function hdr(c, title, sub) {
+  function shdr(c, title, sub) {
     const t = mk("h2", "s-title");
     t.textContent = title;
     const s = mk("p", "s-sub");
@@ -621,62 +755,158 @@
     c.append(t, s);
   }
 
+  /* ── GENERAL ── */
   function tabGeneral(c) {
-    hdr(c, "General", "Configure general extension behavior.");
+    shdr(c, "General", "Configure general extension behavior.");
     c.appendChild(
-      toggleRow("Auto-enter after transcription", "Automatically press Enter after inserting text", state.autoEnter, (v) => {
+      toggleRow("Auto-enter after transcription", "Press Enter automatically after inserting text. Uses smart mode on chat apps.", state.autoEnter, (v) => {
         state.autoEnter = v;
         save(SK.autoEnter, v);
       })
     );
+
+    // Quality preset
+    const qg = mk("div", "fg");
+    qg.appendChild(lbl("Transcription Speed"));
+    const qsel = mk("select", "sel");
+    [
+      ["fast", "Fast (beam=1) — quickest response"],
+      ["balanced", "Balanced (beam=3) — recommended"],
+      ["best", "Best (beam=5) — highest accuracy"],
+    ].forEach(([v, t]) => {
+      const o = mk("option");
+      o.value = v;
+      o.textContent = t;
+      if (state.quality === v) o.selected = true;
+      qsel.appendChild(o);
+    });
+    qsel.addEventListener("change", () => {
+      state.quality = qsel.value;
+      save(SK.quality, qsel.value);
+      showToast("Quality: " + qsel.value);
+    });
+    qg.appendChild(qsel);
+    c.appendChild(qg);
+
+    // Server status
     const st = mk("div", "s-status");
     const dot = mk("span", "s-dot" + (state.serverOnline ? " on" : ""));
     const txt = mk("span");
-    txt.textContent = ` Server: ${state.serverOnline ? "Online" : "Offline"} (http://127.0.0.1:8000)`;
+    txt.textContent = ` Server: ${state.serverOnline ? "Online" : "Offline"} · Model: ${state.model} · ${state.serverOnline ? "GPU" : "—"}`;
     st.append(dot, txt);
     c.appendChild(st);
   }
 
+  /* ── TRANSCRIPTION ── */
   function tabTranscription(c) {
-    hdr(c, "Transcription", "Configure transcription settings and microphone device.");
+    shdr(c, "Transcription", "Configure transcription settings and microphone device.");
+
+    // Mic device
     const g1 = mk("div", "fg");
     g1.appendChild(lbl("Microphone Device"));
     const sel1 = mk("select", "sel");
     const def = mk("option");
     def.textContent = "Default";
     def.value = "default";
+    if (state.micDevice === "default") def.selected = true;
     sel1.appendChild(def);
-    navigator.mediaDevices
-      ?.enumerateDevices()
-      .then((devs) =>
-        devs.filter((d) => d.kind === "audioinput").forEach((d) => {
-          const o = mk("option");
-          o.value = d.deviceId;
-          o.textContent = d.label || "Mic (" + d.deviceId.slice(0, 6) + ")";
-          sel1.appendChild(o);
-        })
-      )
-      .catch(() => {});
+
+    navigator.mediaDevices?.enumerateDevices().then((devs) =>
+      devs.filter((d) => d.kind === "audioinput").forEach((d) => {
+        const o = mk("option");
+        o.value = d.deviceId;
+        o.textContent = d.label || "Mic (" + d.deviceId.slice(0, 6) + ")";
+        if (state.micDevice === d.deviceId) o.selected = true;
+        sel1.appendChild(o);
+      })
+    ).catch(() => {});
+
+    sel1.addEventListener("change", () => {
+      state.micDevice = sel1.value;
+      save(SK.micDevice, sel1.value);
+      showToast("Microphone changed");
+    });
     g1.appendChild(sel1);
     c.appendChild(g1);
 
+    // Model selection
     const g2 = mk("div", "fg");
     g2.appendChild(lbl("Transcription Model"));
     const sel2 = mk("select", "sel");
-    ["large-v3-turbo", "large-v3", "medium", "small", "base"].forEach((m) => {
-      const o = mk("option");
-      o.textContent = "Whisper (" + m + ")";
-      o.value = m;
-      sel2.appendChild(o);
+
+    // Indicate loading state
+    if (state.modelLoading) {
+      const lo = mk("option");
+      lo.textContent = "Loading model…";
+      lo.disabled = true;
+      lo.selected = true;
+      sel2.appendChild(lo);
+      sel2.disabled = true;
+    } else {
+      [
+        ["large-v3-turbo", "Whisper Large v3 Turbo (fastest, high accuracy)"],
+        ["large-v3", "Whisper Large v3 (slowest, highest accuracy)"],
+        ["medium", "Whisper Medium (balanced)"],
+        ["small", "Whisper Small (fast)"],
+        ["base", "Whisper Base (fastest, basic)"],
+      ].forEach(([v, t]) => {
+        const o = mk("option");
+        o.value = v;
+        o.textContent = t;
+        if (state.model === v) o.selected = true;
+        sel2.appendChild(o);
+      });
+    }
+
+    sel2.addEventListener("change", () => {
+      const newModel = sel2.value;
+      if (newModel === state.model) return;
+      state.modelLoading = true;
+      showToast("Switching model to " + newModel + "…");
+      renderTab(c); // refresh to show loading state
+
+      chrome.runtime.sendMessage({ action: "changeModel", model: newModel }, (resp) => {
+        state.modelLoading = false;
+        if (resp?.error) {
+          showToast("Model switch failed: " + resp.error, "error");
+        } else {
+          state.model = resp?.model || newModel;
+          showToast("Model ready: " + state.model);
+        }
+        renderTab(c); // refresh
+      });
     });
+
     const h = mk("p", "hint");
-    h.textContent = "Larger models are more accurate but slower.";
+    h.textContent = "Switching models takes a few seconds. large-v3-turbo is recommended for the best speed/accuracy tradeoff.";
     g2.append(sel2, h);
     c.appendChild(g2);
+
+    // Max recording time
+    const g3 = mk("div", "fg");
+    g3.appendChild(lbl("Max Recording Duration"));
+    const sel3 = mk("select", "sel");
+    [
+      [60, "1 minute"], [120, "2 minutes"], [180, "3 minutes"],
+      [300, "5 minutes (default)"], [600, "10 minutes"],
+    ].forEach(([v, t]) => {
+      const o = mk("option");
+      o.value = v;
+      o.textContent = t;
+      if (state.maxRecording === v) o.selected = true;
+      sel3.appendChild(o);
+    });
+    sel3.addEventListener("change", () => {
+      state.maxRecording = parseInt(sel3.value);
+      save(SK.maxRecording, state.maxRecording);
+    });
+    g3.appendChild(sel3);
+    c.appendChild(g3);
   }
 
+  /* ── SHORTCUT ── */
   function tabShortcut(c) {
-    hdr(c, "Shortcut", "Set the keyboard shortcut to toggle recording.");
+    shdr(c, "Shortcut", "Set the keyboard shortcut to toggle recording.");
     const g = mk("div", "fg");
     g.appendChild(lbl("Toggle Recording"));
 
@@ -698,15 +928,8 @@
     }
     showKeys();
 
-    box.addEventListener("click", () => {
-      state.shortcutListening = true;
-      box.focus();
-      showKeys();
-    });
-    box.addEventListener("blur", () => {
-      state.shortcutListening = false;
-      showKeys();
-    });
+    box.addEventListener("click", () => { state.shortcutListening = true; box.focus(); showKeys(); });
+    box.addEventListener("blur", () => { state.shortcutListening = false; showKeys(); });
     box.addEventListener("keydown", (e) => {
       if (!state.shortcutListening) return;
       e.preventDefault();
@@ -722,22 +945,24 @@
         save(SK.shortcut, state.shortcut);
         state.shortcutListening = false;
         showKeys();
+        showToast("Shortcut: " + state.shortcut);
       }
     });
 
     const hint = mk("p", "hint");
-    hint.textContent =
-      "Chrome shortcut (Ctrl+Space) is set in chrome://extensions/shortcuts. This custom shortcut works as an additional in-page toggle.";
+    hint.textContent = "Chrome global shortcut (Ctrl+Space) is set in chrome://extensions/shortcuts. This shortcut works as an in-page toggle.";
     g.append(box, hint);
     c.appendChild(g);
   }
 
+  /* ── LANGUAGES ── */
   function tabLanguages(c) {
-    hdr(c, "Languages", "Manage languages and their custom spellings.");
-    const langs = {
-      en: "English", es: "Spanish", fr: "French", de: "German",
-      it: "Italian", pt: "Portuguese", zh: "Chinese", ja: "Japanese",
-      ko: "Korean", hi: "Hindi", ar: "Arabic", ru: "Russian", auto: "Auto Detect",
+    shdr(c, "Languages", "Manage languages and their custom spellings.");
+    const LANG_MAP = {
+      en: "English", es: "Spanish", fr: "French", de: "German", it: "Italian",
+      pt: "Portuguese", zh: "Chinese", ja: "Japanese", ko: "Korean", hi: "Hindi",
+      ar: "Arabic", ru: "Russian", nl: "Dutch", sv: "Swedish", pl: "Polish",
+      tr: "Turkish", uk: "Ukrainian", vi: "Vietnamese", th: "Thai", auto: "Auto Detect",
     };
 
     const addBtn = mk("button", "btn-add");
@@ -745,53 +970,85 @@
     addBtn.style.cssText = "position:absolute;top:28px;right:28px;";
     c.appendChild(addBtn);
 
-    const card = mk("div", "lcard");
-    const chdr = mk("div", "lcard-hdr");
-    const nm = mk("span", "lcard-name");
-    nm.textContent = langs[state.language] || state.language;
-    const rm = mk("button", "lcard-rm");
-    rm.textContent = "✕";
-    chdr.append(nm, rm);
-    card.appendChild(chdr);
-    const sp = mk("button", "link");
-    sp.textContent = "+ Add Spelling";
-    sp.style.marginTop = "8px";
-    card.appendChild(sp);
-    c.appendChild(card);
+    // Show all active languages
+    state.languages.forEach((code) => {
+      const card = mk("div", "lcard" + (code === state.language ? " active" : ""));
+      const chdr = mk("div", "lcard-hdr");
+      const nm = mk("span", "lcard-name");
+      nm.textContent = LANG_MAP[code] || code;
+      if (code === state.language) {
+        const badge = mk("span", "lcard-badge");
+        badge.textContent = "Active";
+        nm.appendChild(badge);
+      }
+      const rm = mk("button", "lcard-rm");
+      rm.textContent = "✕";
+      rm.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (state.languages.length <= 1) return showToast("Need at least one language", "warn");
+        state.languages = state.languages.filter((l) => l !== code);
+        save(SK.languages, state.languages);
+        if (state.language === code) {
+          state.language = state.languages[0];
+          langEl.textContent = state.language;
+          save(SK.language, state.language);
+        }
+        renderTab(c);
+      });
+      chdr.append(nm, rm);
+      card.appendChild(chdr);
+
+      // Click to set as active language
+      card.addEventListener("click", () => {
+        state.language = code;
+        langEl.textContent = state.language;
+        save(SK.language, state.language);
+        renderTab(c);
+        showToast("Language: " + (LANG_MAP[code] || code));
+      });
+      c.appendChild(card);
+    });
 
     addBtn.addEventListener("click", () => {
       if (c.querySelector(".lang-dd")) return;
       const sel = mk("select", "sel lang-dd");
       sel.style.marginTop = "12px";
       const ph = mk("option");
-      ph.textContent = "— Select —";
+      ph.textContent = "— Select language —";
       ph.disabled = true;
       ph.selected = true;
       sel.appendChild(ph);
-      Object.entries(langs).forEach(([code, name]) => {
+      Object.entries(LANG_MAP).forEach(([code, name]) => {
+        if (state.languages.includes(code)) return;
         const o = mk("option");
         o.value = code;
         o.textContent = name;
         sel.appendChild(o);
       });
       sel.addEventListener("change", () => {
+        if (!state.languages.includes(sel.value)) {
+          state.languages.push(sel.value);
+          save(SK.languages, state.languages);
+        }
         state.language = sel.value;
         langEl.textContent = state.language;
         save(SK.language, state.language);
         renderTab(c);
+        showToast("Added: " + (LANG_MAP[sel.value] || sel.value));
       });
       c.appendChild(sel);
     });
   }
 
+  /* ── MODES ── */
   function tabModes(c) {
-    hdr(c, "Modes", "Choose a transcription mode.");
+    shdr(c, "Modes", "Choose a transcription mode.");
     [
-      ["none", "No mode", "Default transcription"],
-      ["punctuation", "Punctuation", "Auto-add punctuation"],
-      ["command", "Command", "Voice commands (new line, delete, etc.)"],
+      ["none", "No mode", "Default transcription without any special processing."],
+      ["punctuation", "Punctuation", "Whisper auto-adds punctuation. Best for dictation."],
+      ["command", "Command", "Voice commands: say \"new line\", \"period\", \"comma\", \"question mark\", \"delete\", etc."],
     ].forEach(([id, l, d]) => {
-      const row = mk("div", "mode" + (id === "none" ? " on" : ""));
+      const row = mk("div", "mode" + (state.mode === id ? " on" : ""));
       const radio = mk("div", "mode-r");
       const info = mk("div");
       const lb = mk("div", "mode-l");
@@ -801,21 +1058,25 @@
       info.append(lb, ds);
       row.append(radio, info);
       row.addEventListener("click", () => {
+        state.mode = id;
+        save(SK.mode, id);
         c.querySelectorAll(".mode").forEach((m) => m.classList.remove("on"));
         row.classList.add("on");
+        showToast("Mode: " + l);
       });
       c.appendChild(row);
     });
   }
 
+  /* ── APPEARANCE ── */
   function tabAppearance(c) {
-    hdr(c, "Appearance", "Choose how the toolbar looks when idle.");
+    shdr(c, "Appearance", "Choose how the toolbar looks when idle.");
     const grid = mk("div", "a-grid");
     [
       { id: "dot", name: "Dot", desc: "Small dot that expands on hover\nMinimalistic and unobtrusive", tags: ["⊕ Movable", "↕ Expandable"], p: "dot" },
       { id: "visible", name: "Visible", desc: "Full toolbar when clicking text boxes\nQuick access to controls", tags: ["📌 Sticky", "⊕ Movable"], p: "vis" },
       { id: "hidden", name: "Hidden", desc: "Handle that expands on hover\nAuto-hides after recording", tags: ["📌 Sticky", "⊕ Movable", "↕ Expandable"], p: "hid" },
-      { id: "minimal", name: "Minimal", desc: "Small indicator while recording\nFor keyboard shortcut users", tags: ["📌 Bottom", "✕ Non-Interactive"], p: "min" },
+      { id: "minimal", name: "Minimal", desc: "Only visible while recording/transcribing\nFor keyboard shortcut users", tags: ["📌 Bottom", "✕ Non-Interactive"], p: "min" },
     ].forEach((a) => {
       const card = mk("div", "a-card" + (state.appearance === a.id ? " sel" : ""));
       const prev = mk("div", "a-prev");
@@ -840,9 +1101,7 @@
       ds.textContent = a.desc;
       const tg = mk("div", "a-tags");
       a.tags.forEach((t) => {
-        const s = mk("span", "a-tag");
-        s.textContent = t;
-        tg.appendChild(s);
+        const s = mk("span", "a-tag"); s.textContent = t; tg.appendChild(s);
       });
       info.append(nm, ds, tg);
       card.append(prev, info);
@@ -851,14 +1110,29 @@
         card.classList.add("sel");
         state.appearance = a.id;
         save(SK.appearance, a.id);
+        showToast("Appearance: " + a.name);
+        // Apply immediately
+        if (a.id === "visible" && state.visible) setUI("expanded");
+        if (a.id === "minimal") { hide(); }
       });
       grid.appendChild(card);
     });
-    c.appendChild(grid);
+
+    // Reset button
+    const reset = mk("button", "s-reset");
+    reset.textContent = "↻ Reset to Default Settings";
+    reset.addEventListener("click", () => {
+      state.appearance = "dot";
+      save(SK.appearance, "dot");
+      renderTab(c);
+      showToast("Reset to defaults");
+    });
+    c.append(grid, reset);
   }
 
+  /* ── SOUND ── */
   function tabSound(c) {
-    hdr(c, "Sound", "Audio feedback for recording.");
+    shdr(c, "Sound", "Audio feedback for recording.");
     c.appendChild(
       toggleRow("Sound on start", "Tone when recording begins", state.sound.onStart, (v) => {
         state.sound.onStart = v;
@@ -873,6 +1147,7 @@
     );
   }
 
+  /* ── SETTINGS HELPERS ── */
   function lbl(t) {
     const l = mk("label", "fl");
     l.textContent = t;
@@ -902,7 +1177,7 @@
   }
 
   /* ══════════════════════════════════════════════════════
-     13. KEYBOARD SHORTCUT (in-page)
+     16. KEYBOARD SHORTCUT
      ══════════════════════════════════════════════════════ */
   document.addEventListener(
     "keydown",
@@ -915,9 +1190,7 @@
       const shift = parts.includes("Shift");
       const meta = parts.includes("Meta");
       if (!ctrl && !alt && !shift && !meta) return;
-      const match =
-        e.key.toUpperCase() === key.toUpperCase() ||
-        (key === "Space" && e.code === "Space");
+      const match = e.key.toUpperCase() === key.toUpperCase() || (key === "Space" && e.code === "Space");
       if (match && e.ctrlKey === ctrl && e.altKey === alt && e.shiftKey === shift && e.metaKey === meta) {
         e.preventDefault();
         e.stopPropagation();
@@ -928,44 +1201,67 @@
   );
 
   /* ══════════════════════════════════════════════════════
-     14. MESSAGES FROM BACKGROUND
+     17. MESSAGES FROM BACKGROUND
      ══════════════════════════════════════════════════════ */
   if (chrome?.runtime?.onMessage) {
     chrome.runtime.onMessage.addListener((msg) => {
-      // Recording started in offscreen
       if (msg.action === "recStarted") {
         state.recording = true;
         setUI("recording");
         playSound("start");
       }
-      // Recording error
       if (msg.action === "recError") {
         console.warn("[Blabby] Recording error:", msg.error);
         state.recording = false;
         state.transcribing = false;
         setUI("expanded");
+        showToast("Recording error: " + msg.error, "error");
       }
-      // Transcription result
+      if (msg.action === "audioLevel") {
+        state.audioLevel = msg.level;
+        updateWaveform(msg.level);
+      }
       if (msg.action === "transcriptionResult") {
         state.transcribing = false;
+        setUI("expanded");
         if (msg.text?.trim()) {
           restoreCursor();
           insertText(msg.text.trim());
+          // Auto-enter
+          if (msg.autoEnter) {
+            setTimeout(() => doAutoEnter(), 50);
+          }
+        }
+        // Auto-hide after transcription for hidden/minimal modes
+        if (state.appearance === "hidden" || state.appearance === "minimal") {
+          setTimeout(() => { if (!state.recording) setUI("idle"); }, 1500);
         }
       }
-      // Transcription error
       if (msg.action === "transcriptionError") {
         state.transcribing = false;
-        console.warn("[Blabby] Transcription error:", msg.error);
+        setUI("expanded");
+        showToast("Transcription failed: " + (msg.error || "Unknown error"), "error");
       }
-      // Direct commands
       if (msg.action === "toggle") toggleRec();
       if (msg.action === "openSettings") openSettings();
     });
   }
 
   /* ══════════════════════════════════════════════════════
-     15. HEALTH CHECK
+     18. WAVEFORM UPDATE
+     ══════════════════════════════════════════════════════ */
+  function updateWaveform(level) {
+    const bars = waveEl.querySelectorAll(".wave-bar");
+    bars.forEach((b, i) => {
+      // Create varied heights based on level + pseudo-random offset
+      const offset = Math.sin(Date.now() / 150 + i * 1.7) * 0.3 + 0.7;
+      const h = Math.max(4, level * offset * 24);
+      b.style.height = h + "px";
+    });
+  }
+
+  /* ══════════════════════════════════════════════════════
+     19. HEALTH CHECK
      ══════════════════════════════════════════════════════ */
   async function checkHealth() {
     try {
@@ -973,13 +1269,14 @@
         chrome.runtime.sendMessage({ action: "healthCheck" }, resolve);
       });
       state.serverOnline = r?.online ?? false;
+      if (r?.model) state.model = r.model;
     } catch {
       state.serverOnline = false;
     }
   }
 
   /* ══════════════════════════════════════════════════════
-     16. INIT
+     20. INIT
      ══════════════════════════════════════════════════════ */
   (async () => {
     await loadSettings();
@@ -991,13 +1288,14 @@
   })();
 
   /* ══════════════════════════════════════════════════════
-     CSS — PURE BLACK THEME
+     CSS — PURE BLACK THEME + PRODUCTION ANIMATIONS
      ══════════════════════════════════════════════════════ */
   function getCSS() {
     return `
 *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
 :host{all:initial}
 
+/* ── Wrapper ── */
 .wrap{
   position:fixed;pointer-events:auto;user-select:none;-webkit-user-select:none;
   will-change:transform;z-index:1;
@@ -1008,6 +1306,7 @@
 }
 .wrap.on{opacity:1}
 
+/* ── Bar ── */
 .bar{
   display:flex;align-items:center;gap:0;
   background:#000;border-radius:50px;padding:0;
@@ -1030,24 +1329,36 @@
 }
 
 .bar.recording{
-  width:auto;min-width:155px;height:44px;padding:4px 6px;gap:2px;
+  width:auto;min-width:180px;height:44px;padding:4px 6px;gap:2px;
   background:#000;border:2px solid #ef4444;opacity:1;
   animation:pulse 1.8s ease-in-out infinite;
 }
 
-@keyframes pulse{
-  0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,.5),0 0 0 0 rgba(239,68,68,.3),0 0 16px rgba(239,68,68,.15)}
-  50%{box-shadow:0 0 0 6px rgba(239,68,68,0),0 0 0 14px rgba(239,68,68,0),0 0 30px rgba(239,68,68,.35)}
+.bar.transcribing{
+  width:auto;min-width:140px;height:44px;padding:4px 6px;gap:2px;
+  background:#000;border:2px solid #3b82f6;opacity:1;
+  animation:tpulse 1.5s ease-in-out infinite;
 }
 
+@keyframes pulse{
+  0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,.5),0 0 16px rgba(239,68,68,.15)}
+  50%{box-shadow:0 0 0 6px rgba(239,68,68,0),0 0 30px rgba(239,68,68,.35)}
+}
+@keyframes tpulse{
+  0%,100%{box-shadow:0 0 0 0 rgba(59,130,246,.4)}
+  50%{box-shadow:0 0 0 5px rgba(59,130,246,0),0 0 20px rgba(59,130,246,.2)}
+}
+
+/* ── Items ── */
 .items{
   display:flex;align-items:center;gap:2px;
   opacity:0;max-width:0;overflow:hidden;
   transition:all .35s cubic-bezier(.4,0,.2,1);white-space:nowrap;
 }
-.bar.expanded .items,.bar.recording .items{opacity:1;max-width:300px}
+.bar.expanded .items,.bar.recording .items,.bar.transcribing .items{opacity:1;max-width:300px}
 .bar.idle .items{opacity:0;max-width:0}
 
+/* ── Buttons ── */
 .btn{
   display:flex;align-items:center;justify-content:center;
   width:34px;height:34px;border-radius:50%;border:none;
@@ -1069,8 +1380,48 @@
   letter-spacing:.5px;text-transform:lowercase;flex-shrink:0;
 }
 .bar.recording .lang{color:#fca5a5}
+.bar.transcribing .lang{color:#93c5fd}
 
-/* Menu */
+/* ── Waveform ── */
+.wave{
+  display:flex;align-items:center;gap:2px;padding:0 4px;height:24px;
+}
+.wave-bar{
+  width:3px;min-height:4px;background:#ef4444;border-radius:2px;
+  transition:height .08s ease;
+}
+
+/* ── Transcribing Spinner ── */
+.spin{display:flex;align-items:center;gap:1px;padding:0 6px;color:#60a5fa}
+.spin-d{
+  font-size:18px;font-weight:700;
+  animation:bounce .8s ease-in-out infinite;
+}
+.spin-d:nth-child(2){animation-delay:.15s}
+.spin-d:nth-child(3){animation-delay:.3s}
+@keyframes bounce{
+  0%,80%,100%{opacity:.3;transform:translateY(0)}
+  40%{opacity:1;transform:translateY(-4px)}
+}
+
+/* ── Toast ── */
+.toast-wrap{
+  position:fixed;bottom:20px;left:50%;transform:translateX(-50%);
+  display:flex;flex-direction:column;gap:8px;align-items:center;
+  pointer-events:none;z-index:50;
+}
+.toast{
+  background:#1a1a1a;border:1px solid rgba(255,255,255,.08);
+  border-radius:10px;padding:8px 16px;font-size:12px;color:#ccc;
+  opacity:0;transform:translateY(10px);transition:all .3s ease;
+  pointer-events:auto;white-space:nowrap;
+  box-shadow:0 4px 16px rgba(0,0,0,.5);
+}
+.toast.show{opacity:1;transform:translateY(0)}
+.toast.warn{border-color:rgba(251,191,36,.3);color:#fbbf24}
+.toast.error{border-color:rgba(239,68,68,.3);color:#f87171}
+
+/* ── Menu ── */
 .menu-bg{position:fixed;inset:0;pointer-events:auto;z-index:10}
 .menu{
   position:fixed;pointer-events:auto;background:#0a0a0a;
@@ -1103,10 +1454,11 @@
   border:none;background:none;width:100%;text-align:left;font-family:inherit;outline:none;
 }
 .mi:hover{background:rgba(255,255,255,.05)}
+.mi.active{background:rgba(59,130,246,.08);color:#60a5fa}
 .mi-ico{width:20px;text-align:center;color:#777;font-size:15px;flex-shrink:0}
 .mi-txt{flex:1;font-weight:500}
 
-/* Settings */
+/* ══ Settings ══ */
 .s-overlay{
   position:fixed;inset:0;background:rgba(0,0,0,.7);
   backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
@@ -1126,6 +1478,7 @@
 }
 @keyframes panelIn{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:none}}
 
+/* sidebar */
 .s-sb{
   width:210px;min-width:210px;background:#050505;
   border-right:1px solid rgba(255,255,255,.05);
@@ -1157,6 +1510,7 @@
 }
 .s-foot-btn:hover{background:rgba(255,255,255,.03);color:#888}
 
+/* content area */
 .s-content{
   flex:1;padding:26px 32px;overflow-y:auto;position:relative;
 }
@@ -1172,14 +1526,10 @@
 }
 .s-close:hover{background:rgba(255,255,255,.06);color:#bbb}
 
-.s-title{
-  font-size:22px;font-weight:700;color:#f0f0f0;
-  margin:0 0 8px 0;line-height:1.2;
-}
-.s-sub{
-  font-size:13px;color:#555;margin:0 0 26px 0;line-height:1.4;
-}
+.s-title{font-size:22px;font-weight:700;color:#f0f0f0;margin:0 0 8px 0;line-height:1.2}
+.s-sub{font-size:13px;color:#555;margin:0 0 26px 0;line-height:1.4}
 
+/* form elements */
 .fg{margin-bottom:22px}
 .fl{display:block;font-size:13px;font-weight:600;color:#ccc;margin-bottom:8px}
 .hint{font-size:12px;color:#555;margin-top:8px;line-height:1.5}
@@ -1193,8 +1543,10 @@
   transition:border-color .15s;
 }
 .sel:hover,.sel:focus{border-color:rgba(255,255,255,.15)}
+.sel:disabled{opacity:.5;cursor:wait}
 .sel option{background:#111;color:#ccc}
 
+/* toggle row */
 .trow{
   display:flex;align-items:center;justify-content:space-between;
   gap:20px;padding:14px 0;max-width:440px;
@@ -1205,9 +1557,7 @@
 .trow-h{font-size:12px;color:#555;line-height:1.35}
 .sw{position:relative;width:42px;height:22px;flex-shrink:0;cursor:pointer;display:block}
 .sw input{opacity:0;width:0;height:0;position:absolute}
-.slider{
-  position:absolute;inset:0;background:#2a2a2a;border-radius:11px;transition:.25s;
-}
+.slider{position:absolute;inset:0;background:#2a2a2a;border-radius:11px;transition:.25s}
 .slider::before{
   content:'';position:absolute;height:16px;width:16px;left:3px;bottom:3px;
   background:#fff;border-radius:50%;transition:.25s;
@@ -1215,11 +1565,11 @@
 .sw input:checked+.slider{background:#3b82f6}
 .sw input:checked+.slider::before{transform:translateX(20px)}
 
+/* shortcut */
 .sc-box{
   display:flex;align-items:center;gap:8px;padding:11px 14px;
   background:#111;border:2px solid rgba(255,255,255,.06);
-  border-radius:9px;max-width:440px;cursor:pointer;
-  transition:all .15s;outline:none;
+  border-radius:9px;max-width:440px;cursor:pointer;transition:all .15s;outline:none;
 }
 .sc-box:hover{border-color:rgba(255,255,255,.12)}
 .sc-box.on{border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.15)}
@@ -1230,12 +1580,20 @@
 }
 .sc-hint{font-size:12px;color:#555;white-space:nowrap}
 
+/* languages */
 .lcard{
   background:#111;border:1px solid rgba(255,255,255,.06);
   border-radius:11px;padding:14px;margin-bottom:10px;max-width:440px;
+  cursor:pointer;transition:all .15s;
 }
+.lcard:hover{border-color:rgba(255,255,255,.12)}
+.lcard.active{border-color:rgba(59,130,246,.3);background:rgba(59,130,246,.04)}
 .lcard-hdr{display:flex;align-items:center;justify-content:space-between}
-.lcard-name{font-size:14px;font-weight:600;color:#ccc}
+.lcard-name{font-size:14px;font-weight:600;color:#ccc;display:flex;align-items:center;gap:8px}
+.lcard-badge{
+  font-size:10px;background:rgba(59,130,246,.15);color:#60a5fa;
+  padding:2px 8px;border-radius:4px;font-weight:600;
+}
 .lcard-rm{
   width:26px;height:26px;border-radius:7px;border:none;background:transparent;
   color:#ef4444;cursor:pointer;font-size:14px;display:flex;align-items:center;
@@ -1245,16 +1603,11 @@
 .btn-add{
   display:inline-flex;align-items:center;gap:5px;padding:7px 14px;
   background:#3b82f6;color:#fff;border:none;border-radius:9px;
-  font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;
-  transition:all .15s;
+  font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;transition:all .15s;
 }
 .btn-add:hover{background:#2563eb}
-.link{
-  color:#4ade80;font-size:12px;font-weight:500;background:none;border:none;
-  cursor:pointer;padding:3px 0;font-family:inherit;display:block;
-}
-.link:hover{text-decoration:underline}
 
+/* modes */
 .mode{
   display:flex;align-items:center;gap:12px;padding:12px 0;
   cursor:pointer;max-width:440px;border-bottom:1px solid rgba(255,255,255,.03);
@@ -1269,8 +1622,9 @@
   background:#3b82f6;border-radius:50%;
 }
 .mode-l{font-size:13px;color:#ccc;font-weight:500}
-.mode-d{font-size:12px;color:#555;margin-top:2px}
+.mode-d{font-size:12px;color:#555;margin-top:2px;line-height:1.45}
 
+/* appearance */
 .a-grid{display:flex;flex-direction:column;gap:12px;max-width:500px}
 .a-card{
   display:flex;background:#0e0e0e;border:2px solid transparent;
@@ -1295,6 +1649,17 @@
 .p-handle{width:50px;height:3px;background:#333;border-radius:2px}
 .p-min{display:flex;align-items:center;gap:4px}
 
+/* reset button */
+.s-reset{
+  display:flex;align-items:center;gap:6px;
+  margin-top:24px;padding:10px 16px;
+  background:transparent;border:1px solid rgba(255,255,255,.06);
+  border-radius:9px;color:#666;font-size:12px;cursor:pointer;
+  font-family:inherit;transition:all .15s;
+}
+.s-reset:hover{border-color:rgba(255,255,255,.12);color:#999}
+
+/* server status */
 .s-status{
   display:flex;align-items:center;gap:8px;font-size:12px;color:#555;
   margin-top:18px;padding:10px 14px;background:#0e0e0e;
