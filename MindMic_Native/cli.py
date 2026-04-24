@@ -45,7 +45,7 @@ def send_cmd(payload_str: str) -> None:
         # Output strictly cleanly stripped JSON strings
         print(data.decode("utf-8").strip())
     except ConnectionRefusedError:
-        print(json.dumps({"error": "Daemon is not running. Please start mindmic_native."}))
+        print(json.dumps({"error": "Daemon is not running. Please start MindMic_Native."}))
     except Exception as e:
         print(json.dumps({"error": f"Socket transmission failed: {str(e)}"}))
 

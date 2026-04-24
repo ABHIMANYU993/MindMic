@@ -2,13 +2,13 @@
 the_real_ui_babbly_ai/
 .git/
 .venv/
-whisper-server/.venv/
-whisper-server/.venv*/
+Whisper_Server/.venv/
+Whisper_Server/.venv*/
 __pycache__/
 *.pyc
 node_modules/
 .DS_Store
-whisper-server/.venv3.11.test
+Whisper_Server/.venv3.11.test
 .gitignore
 server exited unexpectedly
 .env

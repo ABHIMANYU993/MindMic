@@ -25,7 +25,7 @@ async function init() {
   } catch {
     dot.classList.remove("on");
     label.textContent = "Server Offline";
-    detail.textContent = "Start: cd whisper-server && python server.py";
+    detail.textContent = "Start: cd Whisper_Server && python server.py";
   }
 
   // Load shortcut
