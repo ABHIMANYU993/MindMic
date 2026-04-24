@@ -8,6 +8,9 @@ async function init() {
 
   // Check server
   try {
+    const sStore = await chrome.storage.local.get("mindmic_server_url");
+    const activeUrl = sStore.mindmic_server_url || "http://127.0.0.1:8000";
+
     const resp = await chrome.runtime.sendMessage({ action: "healthCheck" });
     if (resp && resp.online) {
       dot.classList.add("on");
@@ -15,7 +18,7 @@ async function init() {
       detail.textContent =
         "Model: " + (resp.model || "whisper") +
         " · " + (resp.device || "gpu") +
-        " · http://127.0.0.1:8000";
+        " · " + activeUrl;
     } else {
       throw new Error();
     }

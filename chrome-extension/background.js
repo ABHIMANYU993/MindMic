@@ -5,16 +5,48 @@
  */
 
 // ── Config ────────────────────────────────────────────
-const DEFAULT_SERVER = "http://127.0.0.1:8000";
+let DEFAULT_SERVER = "http://127.0.0.1:8000";
 let activeTabId = null;
 let offscreenCloser = null; // timer to auto-close offscreen
 
+/**
+ * Loads environmental variables defined via local `.env` overriding standard default paths dynamically.
+ */
+async function loadEnvConfig() {
+  try {
+    const url = chrome.runtime.getURL(".env");
+    const res = await fetch(url);
+    if (res.ok) {
+      const text = await res.text();
+      text.split("\n").forEach(line => {
+        if (line.includes("=") && !line.trim().startsWith("#")) {
+          const [key, ...rest] = line.split("=");
+          if (key.trim() === "WHISPER_URL") {
+            DEFAULT_SERVER = rest.join("=").trim().replace(/^"|"$/g, '').replace(/^'|'$/g, '');
+          }
+        }
+      });
+    }
+  } catch (e) {
+    console.warn("[MindMic] Environment map warning: Unable to parse .env correctly.", e);
+  }
+}
+// Execute instantly at boot priority
+loadEnvConfig();
+
+/**
+ * Resolves the current local GPU processing endpoint extracting from local cache or environment file.
+ * @returns {Promise<string>} 
+ */
 async function getServerUrl() {
   const d = await chrome.storage.local.get("mindmic_server_url");
   return d.mindmic_server_url || DEFAULT_SERVER;
 }
 
 // ── Offscreen Document Management ─────────────────────
+/**
+ * Safely initializes the background invisible web-portal unlocking mic stream capabilities dynamically.
+ */
 async function ensureOffscreen() {
   clearTimeout(offscreenCloser);
   const exists = await chrome.offscreen.hasDocument();
@@ -26,6 +58,9 @@ async function ensureOffscreen() {
   });
 }
 
+/**
+ * Configures the silent shutdown cleanup cycle avoiding browser background processing lockouts natively.
+ */
 function scheduleOffscreenClose() {
   clearTimeout(offscreenCloser);
   offscreenCloser = setTimeout(async () => {
@@ -200,6 +235,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 // ── Transcribe audio from offscreen ───────────────────
+/**
+ * Routes chunks of isolated base audio array streams backwards towards the defined Whisper container handling timeouts.
+ * 
+ * @param {string} dataUrl Base64 Blob pointer extracted explicitly from recording sequences.
+ */
 async function transcribeAudio(dataUrl) {
   // Read all settings
   const data = await chrome.storage.local.get([

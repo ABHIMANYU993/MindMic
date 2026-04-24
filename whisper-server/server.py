@@ -1,3 +1,5 @@
+from typing import Dict, List, Any, Optional
+
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -8,6 +10,13 @@ import os
 import sys
 import re
 import time
+from dotenv import load_dotenv
+
+# Initialize environment variables
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+
+SERVER_HOST: str = os.getenv("HOST", "127.0.0.1")
+SERVER_PORT: int = int(os.getenv("PORT", "8000"))
 
 # ── CUDA Library Pre-Loading ───────────────────────────
 # ONLY looks inside the active Python interpreter's venv.
@@ -119,8 +128,18 @@ device_used = "loading"
 model_loading = False
 
 
-def _try_load(name, device, compute):
-    """Attempt to load a specific model on a device."""
+def _try_load(name: str, device: str, compute: str) -> bool:
+    """
+    Attempt to actively instantiate a specific Whisper model weighting on the requested silicon device.
+    
+    Args:
+        name (str): Model key configuration mapping (e.g. `large-v3-turbo`).
+        device (str): Silicon path identifier mapping (e.g. `cuda` or `cpu`).
+        compute (str): Quantization size schema parameter (e.g. `float16` or `int8`).
+        
+    Returns:
+        bool: Exits True confirming load pipeline finished successfully.
+    """
     global model, model_name, device_used
     m = WhisperModel(name, device=device, compute_type=compute)
     model = m
@@ -130,8 +149,15 @@ def _try_load(name, device, compute):
     return True
 
 
-def load_model(name="large-v3-turbo"):
-    """Load a whisper model with CUDA → CPU fallback chain."""
+def load_model(name: str = "large-v3-turbo") -> None:
+    """
+    Orchestrates the dynamic Whisper model fetching fallback sequence logic.
+    Prioritizes raw CUDA compilation instances natively falling backwards onto CPU mapping
+    gracefully bridging missing driver states.
+    
+    Args:
+        name (str): The requested model path to stream initially.
+    """
     global model_loading
     model_loading = True
     try:
@@ -170,7 +196,8 @@ load_model()
 
 
 @app.get("/health")
-async def health():
+async def health() -> Dict[str, Any]:
+    """Provide isolated heartbeat checks tracing active compilation layers inside FastAPI."""
     return {
         "status": "ok",
         "model": model_name,
@@ -180,19 +207,22 @@ async def health():
 
 
 @app.get("/models")
-async def list_models():
-    """List available models and which one is active."""
-    models = []
+async def list_models() -> Dict[str, Any]:
+    """Retrieve structurally permitted standard model arrays identifying backend parameters."""
+    models: List[Dict[str, Any]] = []
     for m in AVAILABLE_MODELS:
         models.append({**m, "active": m["id"] == model_name})
     return {"models": models, "active": model_name, "device": device_used}
 
 
 @app.post("/model")
-async def change_model(body: dict):
-    """Hot-swap the loaded model."""
-    new_model = body.get("model", "").strip()
-    valid_ids = [m["id"] for m in AVAILABLE_MODELS]
+async def change_model(body: Dict[str, str]) -> Any:
+    """
+    Hot-swap runtime Whisper models mapping dynamically inside global CUDA layouts.
+    Will gracefully crash-block invalid strings.
+    """
+    new_model: str = body.get("model", "").strip()
+    valid_ids: List[str] = [m["id"] for m in AVAILABLE_MODELS]
     if new_model not in valid_ids:
         return JSONResponse(
             status_code=400,
@@ -208,11 +238,13 @@ async def change_model(body: dict):
 @app.post("/transcribe")
 async def transcribe(
     file: UploadFile = File(...),
-    language: str = Form(None),
+    language: Optional[str] = Form(None),
     quality: str = Form("balanced"),
     mode: str = Form("none"),
-):
-    """Transcribe audio with quality presets and mode processing."""
+) -> Any:
+    """
+    Core transcription pipe logic processing bytes streams actively parsing against loaded engines.
+    """
     global model, model_name, device_used
 
     audio_bytes = await file.read()
@@ -337,4 +369,5 @@ def process_voice_commands(text: str) -> str:
 
 # ── Main ───────────────────────────────────────────────
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    print(f"Spinning up Uvicorn dynamically tied against {SERVER_HOST}:{SERVER_PORT}")
+    uvicorn.run(app, host=SERVER_HOST, port=SERVER_PORT)

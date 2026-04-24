@@ -64,6 +64,10 @@
   /* ══════════════════════════════════════════════════════
      2. SETTINGS LOAD/SAVE
      ══════════════════════════════════════════════════════ */
+  /**
+   * Promisified configuration extractor hydrating the `state` mapping locally
+   * bridging extension sandbox caching into memory limits instantly.
+   */
   function loadSettings() {
     return new Promise((r) => {
       if (!chrome?.storage?.local) return r();
@@ -95,6 +99,11 @@
   /* ══════════════════════════════════════════════════════
      3. HELPERS
      ══════════════════════════════════════════════════════ */
+  /**
+   * Determines explicitly if a structured DOM pointer allows mutable injection paths.
+   * @param {HTMLElement} el The targeted browser component.
+   * @returns {boolean} Verified writeable state indicator.
+   */
   function isInput(el) {
     if (!el) return false;
     if (el.isContentEditable) return true;
@@ -137,6 +146,10 @@
     } catch (_) {}
   }
 
+  /**
+   * Generates short micro-feedback audio responses reflecting transcription lifecycle gates softly.
+   * @param {string} type Signal trigger enum map ('start' | 'stop').
+   */
   function playSound(type) {
     if (type === "start" && !state.sound.onStart) return;
     if (type === "stop" && !state.sound.onStop) return;
@@ -186,6 +199,12 @@
     [/\btab\b/gi, "\t"],
   ];
 
+  /**
+   * Intercepts transcribed arrays matching command-mode Regex strings replacing spoken text
+   * with punctuation formatting arrays statically.
+   * @param {string} text Generated inference base string.
+   * @returns {string} Fully sanitized text format.
+   */
   function processVoiceCommands(text) {
     let r = text;
     for (const [re, rep] of VOICE_CMDS) r = r.replace(re, rep);
@@ -210,6 +229,10 @@
     return Object.keys(SEND_SELECTORS).some((k) => h.includes(k));
   }
 
+  /**
+   * Programmatically emits a browser-layer Enter event specifically targeted
+   * against active fields following logic validation layers automatically.
+   */
   function doAutoEnter() {
     const el = state.lastInput;
     if (!el) return;
