@@ -1,5 +1,25 @@
 import Service from "resource:///com/github/Aylur/ags/service.js";
 import * as Utils from "resource:///com/github/Aylur/ags/utils.js";
+import App from "resource:///com/github/Aylur/ags/app.js";
+
+// Native dot env loader avoiding external NPM modules via Aylur file utils
+const ENV = {};
+try {
+  const envContent = Utils.readFile(`${App.configDir}/../.env`);
+  envContent.split('\n').forEach(line => {
+    if (line && line.includes('=') && !line.trim().startsWith('#')) {
+      const [key, ...rest] = line.split('=');
+      ENV[key.trim()] = rest.join('=').trim().replace(/^"|"$/g, '').replace(/^'|'$/g, '');
+    }
+  });
+} catch (e) {
+  console.log("[MindMic] Warning: Unable to parse parent .env file securely.");
+}
+
+const PYTHON_BIN = ENV["PYTHON_BIN"] || "/usr/bin/python3";
+const CLI_PATH = ENV["CLI_PATH"] || "cli.py";
+const DAEMON_HOST = ENV["DAEMON_HOST"] || "127.0.0.1";
+const AGS_TCP_PORT = parseInt(ENV["AGS_TCP_PORT"]) || 8765;
 
 /**
  * Enterprise Native AGS Service Bridge
@@ -76,9 +96,7 @@ class MindMicService extends Service {
    * out of its idling state or vice-versa.
    */
   toggleRecording() {
-    const pythonPath = "/home/icebyte/Projects/Personal/Web-Dev/voice_web_extension/mindmic_native/.venv/bin/python";
-    const cliPath = "/home/icebyte/Projects/Personal/Web-Dev/voice_web_extension/mindmic_native/cli.py";
-    Utils.execAsync([pythonPath, cliPath, "toggle_retained"]);
+    Utils.execAsync([PYTHON_BIN, CLI_PATH, "toggle_retained"]);
   }
 
   /**
@@ -114,7 +132,7 @@ class MindMicService extends Service {
     const Gio = imports.gi.Gio;
     const client = new Gio.SocketClient();
     try {
-      const connection = client.connect_to_host("127.0.0.1", 8765, null);
+      const connection = client.connect_to_host(DAEMON_HOST, AGS_TCP_PORT, null);
       if (!connection) return;
 
       const istream = connection.get_input_stream();

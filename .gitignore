@@ -11,3 +11,7 @@ node_modules/
 whisper-server/.venv3.11.test
 .gitignore
 server exited unexpectedly
+.env
+.env.local
+.env.production
+.env.development

@@ -4,15 +4,21 @@ import math
 import struct
 import subprocess
 import wave
+import os
 from typing import List, Optional, Dict, Any
 
+from dotenv import load_dotenv
 import httpx
 import pyaudio
 
+# Load explicit environment
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+
 # --- SYSTEM DEFAULTS & GLOBALS ---
-WHISPER_URL: str = "http://127.0.0.1:8000/transcribe"
-WS_PORT: int = 8765
-CLI_PORT: int = 8766
+WHISPER_URL: str = os.getenv("WHISPER_URL", "http://127.0.0.1:8000/transcribe")
+DAEMON_HOST: str = os.getenv("DAEMON_HOST", "127.0.0.1")
+WS_PORT: int = int(os.getenv("AGS_TCP_PORT", "8765"))
+CLI_PORT: int = int(os.getenv("CLI_TCP_PORT", "8766"))
 
 # --- AUDIO CONFIGURATION ---
 CHUNK: int = 1024
@@ -261,10 +267,10 @@ class MindMicDaemon:
 
     async def main(self) -> None:
         """Bootstraps networking instances tying to event loop and listens indefinitely."""
-        ags_server = await asyncio.start_server(self.ui_server, "127.0.0.1", WS_PORT)
-        cli_server = await asyncio.start_server(self.cli_server, "127.0.0.1", CLI_PORT)
+        ags_server = await asyncio.start_server(self.ui_server, DAEMON_HOST, WS_PORT)
+        cli_server = await asyncio.start_server(self.cli_server, DAEMON_HOST, CLI_PORT)
         
-        print("[MindMic] Enterprise Native Daemon engaged successfully across explicit ports.")
+        print(f"[MindMic] Enterprise Native Daemon engaged successfully against {DAEMON_HOST} on explicit ports.")
         await asyncio.gather(ags_server.serve_forever(), cli_server.serve_forever())
 
 

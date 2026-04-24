@@ -1,7 +1,16 @@
+import os
 import socket
 import sys
 import json
 from typing import Optional
+
+from dotenv import load_dotenv
+
+# Load explicit environment
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+
+DAEMON_HOST: str = os.getenv("DAEMON_HOST", "127.0.0.1")
+CLI_PORT: int = int(os.getenv("CLI_TCP_PORT", "8766"))
 
 
 def send_cmd(payload_str: str) -> None:
@@ -18,7 +27,7 @@ def send_cmd(payload_str: str) -> None:
     """
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.connect(("127.0.0.1", 8766))
+        s.connect((DAEMON_HOST, CLI_PORT))
         
         # Send payload and signal no more writes
         s.sendall(payload_str.encode("utf-8"))
