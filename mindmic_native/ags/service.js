@@ -32,12 +32,12 @@ class MindMicService extends Service {
   _state = "idle";
   _level = 0.0;
   _visibility_mode = "glassy";
-  _show_ui = true;
+  _show_ui = false;
   _margin_right = 20;
   _margin_bottom = 20;
 
   // --- Getters ---
-  
+
   get state() { return this._state; }
   get level() { return this._level; }
   get show_ui() { return this._show_ui; }
@@ -45,7 +45,7 @@ class MindMicService extends Service {
   get margin_bottom() { return this._margin_bottom; }
 
   // --- Setters ---
-  
+
   set state(value) {
     if (this._state !== value) {
       this._state = value;
@@ -153,7 +153,7 @@ class MindMicService extends Service {
         });
       };
       readLoop();
-    } catch (e) {}
+    } catch (e) { }
   }
 }
 
