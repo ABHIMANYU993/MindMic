@@ -1,59 +1,114 @@
 import asyncio
-import websockets
 import json
-import httpx
-import subprocess
-import os
-import pyaudio
-import wave
 import math
 import struct
+import subprocess
+import wave
+from typing import List, Optional, Dict, Any
 
-# --- CONFIG ---
-WHISPER_URL = "http://127.0.0.1:8000/transcribe"
-WS_PORT = 8765
-CLI_PORT = 8766
-CHUNK = 1024
-FORMAT = pyaudio.paInt16
-CHANNELS = 1
-RATE = 16000
+import httpx
+import pyaudio
+
+# --- SYSTEM DEFAULTS & GLOBALS ---
+WHISPER_URL: str = "http://127.0.0.1:8000/transcribe"
+WS_PORT: int = 8765
+CLI_PORT: int = 8766
+
+# --- AUDIO CONFIGURATION ---
+CHUNK: int = 1024
+FORMAT: int = pyaudio.paInt16
+CHANNELS: int = 1
+RATE: int = 16000
 
 
 class MindMicDaemon:
-    def __init__(self):
-        self.state = "idle"
-        self.visibility_mode = "ephemeral"  # ephemeral or glassy
-        self.ui_clients = []
-        self.audio = pyaudio.PyAudio()
-        self.stream = None
-        self.frames = []
+    """
+    Enterprise-grade background daemon governing the MindMic transcription pipeline.
+    
+    Manages audio recording instances, captures PCM audio chunks from default sources,
+    forwards audio streams to AI transcription endpoints, and acts as a central 
+    Raw TCP state synchronization provider for connected native Wayland interfaces.
+    """
 
-    async def broadcast_state(self):
-        if self.ui_clients:
-            msg = json.dumps(
-                {
-                    "action": "state",
-                    "status": self.state,
-                    "visibility": self.visibility_mode,
-                }
-            )
-            await asyncio.gather(*[client.send(msg) for client in self.ui_clients])
+    def __init__(self) -> None:
+        """
+        Initializes the backend daemon with strict explicit defaults and instantiates 
+        the internal PyAudio processing context.
+        """
+        self.state: str = "idle"
+        self.visibility_mode: str = "ephemeral"
+        self.ui_writers: List[asyncio.StreamWriter] = []
+        self.audio: pyaudio.PyAudio = pyaudio.PyAudio()
+        self.stream: Optional[pyaudio.Stream] = None
+        self.frames: List[bytes] = []
 
-    async def broadcast_level(self, level):
-        if self.ui_clients and self.state == "recording":
-            msg = json.dumps({"action": "audioLevel", "level": level})
-            await asyncio.gather(*[client.send(msg) for client in self.ui_clients])
+    async def broadcast_state(self) -> None:
+        """
+        Broadcasts the current structural state of the daemon to all active UI clients
+        allowing connected widgets to properly layout and color themselves.
+        """
+        if not self.ui_writers:
+            return
 
-    def calculate_rms(self, data):
-        count = len(data) / 2
-        shorts = struct.unpack(f"{int(count)}h", data)
-        sum_squares = sum(s**2 for s in shorts)
+        payload: str = json.dumps({
+            "action": "state",
+            "status": self.state,
+            "visibility": self.visibility_mode,
+        }) + "\n"
+        
+        for writer in self.ui_writers:
+            try:
+                writer.write(payload.encode("utf-8"))
+            except Exception:
+                pass
+
+
+    async def broadcast_level(self, level: float) -> None:
+        """
+        Transmits real-time calculated RMS audio levels to rendering clients 
+        for generating accurate responsive waveform UI components.
+        
+        Args:
+            level (float): The calculated audio level volume (0.0 to 1.0).
+        """
+        if not self.ui_writers or self.state != "recording":
+            return
+            
+        payload: str = json.dumps({"action": "audioLevel", "level": level}) + "\n"
+        for writer in self.ui_writers:
+            try:
+                writer.write(payload.encode("utf-8"))
+            except Exception:
+                pass
+
+
+    def calculate_rms(self, data: bytes) -> float:
+        """
+        Derives the Root Mean Square (RMS) volume level representation
+        extracted from raw audio bytes payload.
+        
+        Args:
+            data (bytes): Chunk of audio byte streams.
+            
+        Returns:
+            float: Fluid bounded volume level representation clamped within [0, 1.0].
+        """
+        count: int = len(data) // 2
+        shorts = struct.unpack(f"{count}h", data)
+        sum_squares: int = sum(s**2 for s in shorts)
+        
         if count == 0:
-            return 0
-        rms = math.sqrt(sum_squares / count)
-        return min(1.0, (rms / 32768.0) * 8.0)
+            return 0.0
+            
+        rms: float = math.sqrt(sum_squares / count)
+        level: float = (rms / 32768.0) * 8.0
+        return min(1.0, level)
 
-    async def record_audio(self):
+    async def record_audio(self) -> None:
+        """
+        Activates the main microphone stream recording sequence capturing buffers.
+        Operates fully asynchronously resolving bytes directly against internal `self.frames`.
+        """
         self.stream = self.audio.open(
             format=FORMAT,
             channels=CHANNELS,
@@ -61,114 +116,156 @@ class MindMicDaemon:
             input=True,
             frames_per_buffer=CHUNK,
         )
-        self.frames = []
+        self.frames.clear()
+        
         try:
             while self.state == "recording":
-                data = self.stream.read(CHUNK, exception_on_overflow=False)
+                # Collect live buffer ignoring silent overflow boundaries
+                data: bytes = self.stream.read(CHUNK, exception_on_overflow=False)
                 self.frames.append(data)
-                level = self.calculate_rms(data)
+                
+                # Emit rendering level updates automatically
+                level: float = self.calculate_rms(data)
                 await self.broadcast_level(level)
                 await asyncio.sleep(0.01)
         except Exception as e:
-            print(f"Audio capture error: {e}")
+            print(f"[Core] Audio capture pipeline error execution: {e}")
         finally:
             if self.stream:
                 self.stream.stop_stream()
                 self.stream.close()
 
-    async def toggle(self, mode):
-        self.visibility_mode = mode  # Set to "quick" (ephemeral) or "retained" (glassy)
+    async def toggle(self, mode: str) -> None:
+        """
+        Primary toggle router triggered across internal UI callbacks or CLI hooks.
+        Rotates system states: `idle` -> `recording` -> `transcribing` -> `idle`.
+        
+        Args:
+            mode (str): Requested visual layout mode (e.g. `ephemeral`, `glassy`).
+        """
+        self.visibility_mode = mode
 
+        # Transition Idle -> Recording
         if self.state in ["idle", "expanded"]:
             self.state = "recording"
             await self.broadcast_state()
             asyncio.create_task(self.record_audio())
 
+        # Transition Recording -> Transcribing -> Idle (Execution loop)
         elif self.state == "recording":
             self.state = "transcribing"
             await self.broadcast_state()
 
-            temp_file = "/tmp/mindmic_buffer.wav"
-            wf = wave.open(temp_file, "wb")
-            wf.setnchannels(CHANNELS)
-            wf.setsampwidth(self.audio.get_sample_size(FORMAT))
-            wf.setframerate(RATE)
-            wf.writeframes(b"".join(self.frames))
-            wf.close()
+            # Compile standard WAV structure inside virtual temporary memory block 
+            temp_file: str = "/tmp/mindmic_buffer.wav"
+            with wave.open(temp_file, "wb") as wf:
+                wf.setnchannels(CHANNELS)
+                wf.setsampwidth(self.audio.get_sample_size(FORMAT))
+                wf.setframerate(RATE)
+                wf.writeframes(b"".join(self.frames))
 
+            # Transmit constructed audio toward Whisper APIs mapping against default options
             async with httpx.AsyncClient() as client:
                 try:
                     with open(temp_file, "rb") as f:
                         files = {"file": ("audio.wav", f, "audio/wav")}
-                        data = {
+                        data: Dict[str, str] = {
                             "mode": "none",
                             "language": "en",
                             "quality": "balanced"
-                            # max_recording and model are global server configs usually or handled there but these are request defaults requested
                         }
-                        response = await client.post(
+                        
+                        response: httpx.Response = await client.post(
                             WHISPER_URL, files=files, data=data, timeout=30.0
                         )
+                        
+                        # Upon successful HTTP fetch, invoke Wayland virtual keystroke inputs (wtype)
                         if response.status_code == 200:
-                            data = response.json()
-                            text = data.get("text", "").strip()
+                            resp_payload: Dict[str, Any] = response.json()
+                            text: str = resp_payload.get("text", "").strip()
                             if text:
-                                subprocess.run(["wtype", "--", text])
+                                subprocess.run(["wtype", "--", text], check=False)
                 except Exception as e:
-                    print(f"Transcription error: {e}")
+                    print(f"[Network] Transcription process error context: {e}")
 
+            # Restore pipeline closure back mapping to default standard
             self.state = "idle"
             await self.broadcast_state()
 
-    # --- SERVERS ---
-    async def ws_handler(self, websocket):
-        self.ui_clients.append(websocket)
-        try:
-            await websocket.send(
-                json.dumps(
-                    {
-                        "action": "state",
-                        "status": self.state,
-                        "visibility": self.visibility_mode,
-                    }
-                )
-            )
-            await websocket.wait_closed()
-        finally:
-            if websocket in self.ui_clients:
-                self.ui_clients.remove(websocket)
+    # -----------------------------
+    # NETWORK SERVERS & EVENT LOOPS
+    # -----------------------------
 
-    async def cli_server(self, reader, writer):
+    async def ui_server(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """
+        Handles explicit Raw TCP initialization lifecycle mappings for 
+        connecting JavaScript components updating UI layouts asynchronously.
+        """
+        self.ui_writers.append(writer)
         try:
-            data = b""
+            init_payload: str = json.dumps({
+                "action": "state",
+                "status": self.state,
+                "visibility": self.visibility_mode,
+            }) + "\n"
+            writer.write(init_payload.encode("utf-8"))
+            await writer.drain()
+            
+            # Persist connection indefinitely until pipe snaps
             while True:
-                chunk = await reader.read(4096)
+                data = await reader.read(1024)
+                if not data:
+                    break
+        except Exception:
+            pass
+        finally:
+            if writer in self.ui_writers:
+                self.ui_writers.remove(writer)
+            try:
+                writer.close()
+            except Exception:
+                pass
+
+
+    async def cli_server(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """
+        Low latency async socket TCP reader tracking inbound strings 
+        transmitted globally via CLI. Interprets actions routing directly to self.
+        """
+        try:
+            data_bytes: bytes = b""
+            while True:
+                chunk: bytes = await reader.read(4096)
                 if not chunk:
                     break
-                data += chunk
+                data_bytes += chunk
             
-            message = data.decode().strip()
+            message: str = data_bytes.decode().strip()
             if not message:
                 writer.close()
                 return
 
+            # Execute explicit toggle maps
             if message.startswith("toggle_"):
-                mode = "ephemeral" if "quick" in message else "glassy"
-                await self.toggle(mode)
-                response = {"status": "ok", "message": "Toggled recording"}
+                ui_mode: str = "ephemeral" if "quick" in message else "glassy"
+                await self.toggle(ui_mode)
                 
-            writer.write(json.dumps(response).encode("utf-8"))
+                resp_payload: Dict[str, str] = {"status": "ok", "message": "Toggled recording sequence"}
+                writer.write(json.dumps(resp_payload).encode("utf-8"))
+
         except Exception as e:
             writer.write(json.dumps({"error": str(e)}).encode("utf-8"))
         finally:
             await writer.drain()
             writer.close()
 
-    async def main(self):
-        ws_server = await websockets.serve(self.ws_handler, "127.0.0.1", WS_PORT)
+    async def main(self) -> None:
+        """Bootstraps networking instances tying to event loop and listens indefinitely."""
+        ags_server = await asyncio.start_server(self.ui_server, "127.0.0.1", WS_PORT)
         cli_server = await asyncio.start_server(self.cli_server, "127.0.0.1", CLI_PORT)
-        print("MindMic Native Daemon running...")
-        await asyncio.gather(ws_server.wait_closed(), cli_server.serve_forever())
+        
+        print("[MindMic] Enterprise Native Daemon engaged successfully across explicit ports.")
+        await asyncio.gather(ags_server.serve_forever(), cli_server.serve_forever())
 
 
 if __name__ == "__main__":
