@@ -1,25 +1,27 @@
 # Whisper Server (Core AI Hub)
 
-The enterprise neural inference loop responsible for explicitly computing audio translations natively. By default, it operates completely offline across `http://127.0.0.1:8000` utilizing explicit CUDA offloading dynamically mapped inside a robust FastAPI execution server.
+The enterprise neural inference loop responsible for explicitly computing audio translations dynamically locally. Utilizing CTranslate2, the engine explicitly hooks directly against raw Nvidia CUDA primitives completely decoupling from heavy wrappers like PyTorch resulting in immense inference latency drops!
 
-## Hardware & Environment Requirements
-Because the server attempts to pre-load massive inference matrix weights actively natively against hardware, VRAM scaling dictates model load limitations. 
-- **Large V3 Turbo**: > 4GB VRAM
-- **Large V3**: > 8GB VRAM
-- **Medium**: > 3GB VRAM
-- **Small/Base**: Strict CPU mode runs perfectly at ~2GB System RAM.
+## Model Tier Map
+The server ships supporting multiple Whisper variations which can be hot-swapped over native commands mapping against specific hardware profiles:
+- **`large-v3-turbo`** *(Default)*: Extremely fast, massive accuracy. > 4GB VRAM target.
+- **`large-v3`**: Perfect accuracy mapping, heavy weight. > 8GB VRAM target.
+- **`medium`**: Good speed/accuracy balance. > 3GB VRAM target.
+- **`small`**: High speed accuracy. > 2GB VRAM target.
+- **`base`**: The ultimate fallback. Can strictly run in pure int8 CPU mode bridging system ram mapping perfectly.
 
-## Installation
-Ensure you maintain an isolated virtual environment (`.venv`) to securely map the runtime CUDA requirements independently against system limitations.
+## Installation Pipeline
+Because the environment natively hooks absolute CUDA mappings, the Python `venv` strictly serves the `.so` bindings.
+
 ```bash
+cd Whisper_Server
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Running the Server
-The central daemon explicitly respects bounds from its mapped `.env` configurations natively skipping CLI arguments dynamically.
+## Executing Inference Daemon
+The fastAPI executable spins actively picking up constants dynamically against the `.env` local configurations seamlessly!
 ```bash
 python server.py
-# Bootstrapping Uvicorn explicitly against mapped IPs
 ```
