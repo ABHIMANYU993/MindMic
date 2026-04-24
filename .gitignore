@@ -1,5 +1,5 @@
 .python-version
-the_real_ui_babbly_ai/
+the_ui/
 .git/
 .venv/
 Whisper_Server/.venv/
