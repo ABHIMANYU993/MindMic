@@ -26,7 +26,6 @@ window.mindmic-window {
 }
 
 .bar.expanded {
-  min-width: 190px;
   min-height: 44px;
   padding: 4px 6px;
   border: 1px solid rgba(255, 255, 255, 0.12);
@@ -34,7 +33,6 @@ window.mindmic-window {
 }
 
 .bar.recording {
-  min-width: 180px;
   min-height: 44px;
   padding: 4px 6px;
   border: 2px solid #ef4444;
@@ -42,7 +40,6 @@ window.mindmic-window {
 }
 
 .bar.transcribing {
-  min-width: 140px;
   min-height: 44px;
   padding: 4px 6px;
   border: 2px solid #3b82f6;
@@ -118,13 +115,23 @@ window.mindmic-window {
 }
 
 .spin {
-  color: #60a5fa;
-  margin: 0px 6px;
+  padding: 0px 4px;
 }
 .spin-d {
-  font-size: 18px;
-  font-weight: bold;
-  margin: 0px 1px;
+  min-width: 6px;
+  min-height: 6px;
+  background-color: #60a5fa;
+  border-radius: 50px;
+  margin: 0px 3px;
+  animation: mindmic_bounce 0.6s infinite alternate ease-in-out;
+}
+.d1 { animation-delay: 0s; }
+.d2 { animation-delay: 0.2s; }
+.d3 { animation-delay: 0.4s; }
+
+@keyframes mindmic_bounce {
+  from { margin-top: 4px; margin-bottom: 0px; }
+  to { margin-top: 0px; margin-bottom: 4px; }
 }
 
 /* --- SUBMENU --- */

@@ -27,32 +27,6 @@ class MindMicDaemon:
         self.audio = pyaudio.PyAudio()
         self.stream = None
         self.frames = []
-        self.config_path = os.path.expanduser("~/.config/mindmic_native_settings.json")
-        self.config = self.load_settings()
-
-    def load_settings(self):
-        default_config = {
-            "mode": "none",
-            "language": "auto",
-            "quality": "balanced",
-            "model": "large-v3-turbo"
-        }
-        try:
-            if os.path.exists(self.config_path):
-                with open(self.config_path, "r") as f:
-                    data = json.load(f)
-                    default_config.update(data)
-        except Exception as e:
-            print(f"Error loading config: {e}")
-        return default_config
-
-    def save_settings(self):
-        try:
-            os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
-            with open(self.config_path, "w") as f:
-                json.dump(self.config, f, indent=4)
-        except Exception as e:
-            print(f"Error saving config: {e}")
 
     async def broadcast_state(self):
         if self.ui_clients:
@@ -127,9 +101,10 @@ class MindMicDaemon:
                     with open(temp_file, "rb") as f:
                         files = {"file": ("audio.wav", f, "audio/wav")}
                         data = {
-                            "mode": self.config.get("mode", "none"),
-                            "language": self.config.get("language", "auto"),
-                            "quality": self.config.get("quality", "balanced")
+                            "mode": "none",
+                            "language": "en",
+                            "quality": "balanced"
+                            # max_recording and model are global server configs usually or handled there but these are request defaults requested
                         }
                         response = await client.post(
                             WHISPER_URL, files=files, data=data, timeout=30.0
@@ -177,37 +152,7 @@ class MindMicDaemon:
                 writer.close()
                 return
 
-            response = {"status": "error", "message": "Unknown command"}
-            
-            if message.startswith("{"):
-                payload = json.loads(message)
-                action = payload.get("action")
-                
-                if action == "get_settings":
-                    response = self.config
-                elif action == "update_setting":
-                    key = payload.get("key")
-                    val = payload.get("value")
-                    if key:
-                        self.config[key] = val
-                        self.save_settings()
-                        response = {"status": "ok", "config": self.config}
-                elif action == "get_models":
-                    async with httpx.AsyncClient() as client:
-                        resp = await client.get(WHISPER_URL.replace("/transcribe", "/models"))
-                        response = resp.json()
-                elif action == "set_model":
-                    model_id = payload.get("model")
-                    async with httpx.AsyncClient() as client:
-                        resp = await client.post(WHISPER_URL.replace("/transcribe", "/model"), json={"model": model_id})
-                        response = resp.json()
-                        self.config["model"] = model_id
-                        self.save_settings()
-                elif action == "health":
-                    async with httpx.AsyncClient() as client:
-                        resp = await client.get(WHISPER_URL.replace("/transcribe", "/health"))
-                        response = resp.json()
-            elif message.startswith("toggle_"):
+            if message.startswith("toggle_"):
                 mode = "ephemeral" if "quick" in message else "glassy"
                 await self.toggle(mode)
                 response = {"status": "ok", "message": "Toggled recording"}
