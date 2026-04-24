@@ -9,3 +9,5 @@ __pycache__/
 node_modules/
 .DS_Store
 whisper-server/.venv3.11.test
+.gitignore
+server exited unexpectedly

@@ -16,9 +16,11 @@ import ctypes
 import glob
 
 _venv_sp = os.path.join(
-    sys.prefix, "lib",
+    sys.prefix,
+    "lib",
     f"python{sys.version_info.major}.{sys.version_info.minor}",
-    "site-packages", "nvidia",
+    "site-packages",
+    "nvidia",
 )
 _cuda_ok = False
 
@@ -62,18 +64,52 @@ app.add_middleware(
 
 # ── Available Models ───────────────────────────────────
 AVAILABLE_MODELS = [
-    {"id": "large-v3-turbo", "name": "Whisper Large v3 Turbo", "params": "809M", "speed": "fastest", "accuracy": "high"},
-    {"id": "large-v3", "name": "Whisper Large v3", "params": "1550M", "speed": "slow", "accuracy": "highest"},
-    {"id": "medium", "name": "Whisper Medium", "params": "769M", "speed": "medium", "accuracy": "good"},
-    {"id": "small", "name": "Whisper Small", "params": "244M", "speed": "fast", "accuracy": "moderate"},
-    {"id": "base", "name": "Whisper Base", "params": "74M", "speed": "fastest", "accuracy": "basic"},
+    {
+        "id": "large-v3-turbo",
+        "name": "Whisper Large v3 Turbo",
+        "params": "809M",
+        "speed": "fastest",
+        "accuracy": "high",
+    },
+    {
+        "id": "large-v3",
+        "name": "Whisper Large v3",
+        "params": "1550M",
+        "speed": "slow",
+        "accuracy": "highest",
+    },
+    {
+        "id": "medium",
+        "name": "Whisper Medium",
+        "params": "769M",
+        "speed": "medium",
+        "accuracy": "good",
+    },
+    {
+        "id": "small",
+        "name": "Whisper Small",
+        "params": "244M",
+        "speed": "fast",
+        "accuracy": "moderate",
+    },
+    {
+        "id": "base",
+        "name": "Whisper Base",
+        "params": "74M",
+        "speed": "fastest",
+        "accuracy": "basic",
+    },
 ]
 
 # Quality presets — balanced is default
 QUALITY_PRESETS = {
-    "fast":     {"beam_size": 1, "best_of": 1, "temperature": [0.0]},
+    "fast": {"beam_size": 1, "best_of": 1, "temperature": [0.0]},
     "balanced": {"beam_size": 3, "best_of": 3, "temperature": [0.0, 0.2, 0.4]},
-    "best":     {"beam_size": 5, "best_of": 5, "temperature": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]},
+    "best": {
+        "beam_size": 5,
+        "best_of": 5,
+        "temperature": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+    },
 }
 
 # ── Model Manager ─────────────────────────────────────
@@ -132,6 +168,7 @@ load_model()
 
 # ── Endpoints ──────────────────────────────────────────
 
+
 @app.get("/health")
 async def health():
     return {
@@ -157,9 +194,10 @@ async def change_model(body: dict):
     new_model = body.get("model", "").strip()
     valid_ids = [m["id"] for m in AVAILABLE_MODELS]
     if new_model not in valid_ids:
-        return JSONResponse(status_code=400, content={
-            "error": f"Unknown model '{new_model}'. Valid: {valid_ids}"
-        })
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Unknown model '{new_model}'. Valid: {valid_ids}"},
+        )
     if new_model == model_name and not model_loading:
         return {"status": "already_loaded", "model": model_name, "device": device_used}
 
@@ -236,15 +274,24 @@ async def transcribe(
                 print(f"✅ Forced CPU reload of '{model_name}'")
                 # Retry transcription on CPU
                 segments, info = model.transcribe(
-                    tmp_path, language=lang, beam_size=3,
-                    vad_filter=True, condition_on_previous_text=False,
+                    tmp_path,
+                    language=lang,
+                    beam_size=3,
+                    vad_filter=True,
+                    condition_on_previous_text=False,
                 )
                 text = " ".join(seg.text for seg in segments).strip()
                 if mode == "command" and text:
                     text = process_voice_commands(text)
-                return {"text": text, "language": info.language, "duration": round(info.duration, 2)}
+                return {
+                    "text": text,
+                    "language": info.language,
+                    "duration": round(info.duration, 2),
+                }
             except Exception as e2:
-                return JSONResponse(status_code=500, content={"error": f"CPU fallback failed: {e2}"})
+                return JSONResponse(
+                    status_code=500, content={"error": f"CPU fallback failed: {e2}"}
+                )
         return JSONResponse(status_code=500, content={"error": err})
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
@@ -283,8 +330,8 @@ def process_voice_commands(text: str) -> str:
     for pattern, replacement in VOICE_COMMANDS.items():
         result = re.sub(pattern, replacement, result, flags=re.IGNORECASE)
     # Clean up extra spaces around punctuation
-    result = re.sub(r'\s+([.,!?;:)\]])', r'\1', result)
-    result = re.sub(r'([\[(])\s+', r'\1', result)
+    result = re.sub(r"\s+([.,!?;:)\]])", r"\1", result)
+    result = re.sub(r"([\[(])\s+", r"\1", result)
     return result.strip()
 
 
