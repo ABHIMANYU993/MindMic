@@ -118,7 +118,7 @@ def load_model(model_type: str) -> None:
             try:
                 print("Falling back to CPU for NVIDIA Parakeet...")
                 import nemo.collections.asr as nemo_asr
-                model = nemo_asr.models.ASRModel.from_pretrained("nvidia/parakeet-tdt-0.6b-v2")
+                model = nemo_asr.models.ASRModel.from_pretrained("nvidia/parakeet-tdt-0.6b-v3")
                 model.eval()
                 device_used = "cpu"
                 model_name = "parakeet"
@@ -269,16 +269,58 @@ async def transcribe(
             text = " ".join(seg.text for seg in segments).strip()
             detected_lang = info.language
         else:
-            # NVIDIA Parakeet inference
-            transcriptions = model.transcribe([wav_path])
-            if isinstance(transcriptions, list) and len(transcriptions) > 0:
-                res = transcriptions[0]
-                if hasattr(res, "text"):
-                    text = res.text.strip()
+            # NVIDIA Parakeet enterprise-grade inference with chunking
+            chunk_duration = 90.0 # 1.5 minutes hard cap for absolute VRAM safety
+            
+            if duration <= chunk_duration:
+                import torch
+                with torch.no_grad():
+                    transcriptions = model.transcribe([wav_path], batch_size=1)
+                if isinstance(transcriptions, list) and len(transcriptions) > 0:
+                    res = transcriptions[0]
+                    text = res.text.strip() if hasattr(res, "text") else str(res).strip()
                 else:
-                    text = str(res).strip()
+                    text = ""
             else:
-                text = ""
+                import math
+                import torch
+                
+                chunk_paths = []
+                data, sr = sf.read(wav_path)
+                chunk_samples = int(chunk_duration * sr)
+                num_chunks = math.ceil(len(data) / chunk_samples)
+                
+                try:
+                    for i in range(num_chunks):
+                        start = i * chunk_samples
+                        end = min((i + 1) * chunk_samples, len(data))
+                        chunk_data = data[start:end]
+                        fd, temp_path = tempfile.mkstemp(suffix=".wav")
+                        os.close(fd)
+                        sf.write(temp_path, chunk_data, sr)
+                        chunk_paths.append(temp_path)
+                    
+                    texts = []
+                    # Process sequentially strictly dropping references
+                    for p in chunk_paths:
+                        with torch.no_grad():
+                            res_list = model.transcribe([p], batch_size=1)
+                        if isinstance(res_list, list) and len(res_list) > 0:
+                            res = res_list[0]
+                            t = res.text.strip() if hasattr(res, "text") else str(res).strip()
+                            if t:
+                                texts.append(t)
+                                
+                    text = " ".join(texts).strip()
+                finally:
+                    # Bulletproof cleanup of all chunks even on crash
+                    for p in chunk_paths:
+                        try:
+                            if os.path.exists(p):
+                                os.unlink(p)
+                        except OSError:
+                            pass
+                            
             detected_lang = "en"
             
         elapsed = round(time.time() - t0, 2)
