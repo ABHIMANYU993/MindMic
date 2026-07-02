@@ -1,7 +1,7 @@
 from typing import Dict, List, Any, Optional
 import os
 # Configure PyTorch caching allocator to automatically manage fragmentation and limit VRAM accumulation without manual empty_cache crashes
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "garbage_collection_threshold:0.15,max_split_size_mb:128,expandable_segments:True"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "garbage_collection_threshold:0.10,max_split_size_mb:128,expandable_segments:True"
 import sys
 import re
 import time
@@ -282,7 +282,7 @@ async def transcribe(
             if duration <= chunk_duration:
                 import torch
                 with torch.no_grad():
-                    transcriptions = model.transcribe([wav_path], batch_size=1)
+                    transcriptions = model.transcribe([wav_path], batch_size=1, num_workers=0)
                 if isinstance(transcriptions, list) and len(transcriptions) > 0:
                     res = transcriptions[0]
                     text = res.text.strip() if hasattr(res, "text") else str(res).strip()
@@ -336,7 +336,7 @@ async def transcribe(
                     # Process sequentially strictly dropping references
                     for p in chunk_paths:
                         with torch.no_grad():
-                            res_list = model.transcribe([p], batch_size=1)
+                            res_list = model.transcribe([p], batch_size=1, num_workers=0)
                         if isinstance(res_list, list) and len(res_list) > 0:
                             res = res_list[0]
                             t = res.text.strip() if hasattr(res, "text") else str(res).strip()
@@ -387,6 +387,15 @@ async def transcribe(
             try:
                 os.unlink(wav_path)
             except OSError:
+                pass
+        
+        # Hard-reset VRAM back to exactly the pristine initial state
+        if torch.cuda.is_available():
+            try:
+                import gc
+                gc.collect()
+                torch.cuda.empty_cache()
+            except Exception:
                 pass
 
 # ── Voice Command Processing ──
