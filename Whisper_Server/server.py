@@ -270,7 +270,7 @@ async def transcribe(
             detected_lang = info.language
         else:
             # NVIDIA Parakeet enterprise-grade inference with chunking
-            chunk_duration = 90.0 # 1.5 minutes hard cap for absolute VRAM safety
+            chunk_duration = 35.0 # 35 seconds hard cap for strict 1.5GB-1.7GB VRAM limit
             
             if duration <= chunk_duration:
                 import torch
