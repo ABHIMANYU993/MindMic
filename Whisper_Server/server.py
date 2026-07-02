@@ -1,7 +1,7 @@
 from typing import Dict, List, Any, Optional
 import os
 # Configure PyTorch caching allocator to automatically manage fragmentation and limit VRAM accumulation without manual empty_cache crashes
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "garbage_collection_threshold:0.6,max_split_size_mb:128"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "garbage_collection_threshold:0.22,max_split_size_mb:128,expandable_segments:True"
 import sys
 import re
 import time
@@ -335,9 +335,13 @@ async def transcribe(
                             t = res.text.strip() if hasattr(res, "text") else str(res).strip()
                             if t:
                                 texts.append(t)
+                            del res
+                        del res_list
                                 
                     text = " ".join(texts).strip()
                 finally:
+                    import gc
+                    gc.collect()
                     # Bulletproof cleanup of all chunks even on crash
                     for p in chunk_paths:
                         try:
