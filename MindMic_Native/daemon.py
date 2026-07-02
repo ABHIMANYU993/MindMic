@@ -159,6 +159,14 @@ class MindMicDaemon:
 
         # Transition Recording -> Transcribing -> Idle (Execution loop)
         elif self.state == "recording":
+            # Check if recording is too short (less than ~0.45 seconds / 7 frames)
+            if len(self.frames) < 7:
+                print(f"[Core] Recording too short ({len(self.frames)} frames), discarding.")
+                self.frames.clear()
+                self.state = "idle"
+                await self.broadcast_state()
+                return
+
             self.state = "transcribing"
             await self.broadcast_state()
 
@@ -190,6 +198,8 @@ class MindMicDaemon:
                             resp_payload: Dict[str, Any] = response.json()
                             text: str = resp_payload.get("text", "").strip()
                             if text:
+                                # Small delay to ensure physical modifier keys (like SUPER) are released
+                                await asyncio.sleep(0.4)
                                 subprocess.run(["wtype", "--", text], check=False)
                 except Exception as e:
                     print(f"[Network] Transcription process error context: {e}")

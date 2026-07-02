@@ -1,27 +1,47 @@
-# Whisper Server (Core AI Hub)
+# Whisper/Parakeet Voice Server V2 (Default)
 
-The enterprise neural inference loop responsible for explicitly computing audio translations dynamically locally. Utilizing CTranslate2, the engine explicitly hooks directly against raw Nvidia CUDA primitives completely decoupling from heavy wrappers like PyTorch resulting in immense inference latency drops!
+The neural voice transcription server running FastAPI to power the MindMic dictation pipeline. Version 2 default features:
+- **NVIDIA Parakeet-TDT (0.6B v3)**: Default, ultra-low latency, running on PyTorch with CUDA in FP16 mode.
+- **Distil-Whisper Large V3**: Highly accurate, running on CTranslate2.
 
-## Model Tier Map
-The server ships supporting multiple Whisper variations which can be hot-swapped over native commands mapping against specific hardware profiles:
-- **`large-v3-turbo`** *(Default)*: Extremely fast, massive accuracy. > 4GB VRAM target.
-- **`large-v3`**: Perfect accuracy mapping, heavy weight. > 8GB VRAM target.
-- **`medium`**: Good speed/accuracy balance. > 3GB VRAM target.
-- **`small`**: High speed accuracy. > 2GB VRAM target.
-- **`base`**: The ultimate fallback. Can strictly run in pure int8 CPU mode bridging system ram mapping perfectly.
+## Getting Started
 
-## Installation Pipeline
-Because the environment natively hooks absolute CUDA mappings, the Python `venv` strictly serves the `.so` bindings.
-
+### Installation
+Ensure you have `ffmpeg` installed on your host system:
 ```bash
-cd Whisper_Server
+# Ubuntu/Debian
+sudo apt-get install ffmpeg libsndfile1
+
+# Arch Linux
+sudo pacman -S ffmpeg libsndfile
+```
+
+Set up the virtual environment:
+```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Executing Inference Daemon
-The fastAPI executable spins actively picking up constants dynamically against the `.env` local configurations seamlessly!
+### Running the Server
+You can control the server using the provided `Makefile`:
 ```bash
-python server.py
+# Run the default Parakeet model on CUDA
+make run
+
+# Run with Distil-Whisper instead
+make run MODEL=distil-whisper
+
+# Customize host and port
+make run MODEL=parakeet HOST=0.0.0.0 PORT=8080
+```
+
+### Running with Docker
+Build and run the lightweight container:
+```bash
+# Build the container
+make build
+
+# Run the container (requires NVIDIA Container Toolkit for GPU)
+docker run --gpus all -p 8000:8000 mindmic-whisper-server:latest
 ```

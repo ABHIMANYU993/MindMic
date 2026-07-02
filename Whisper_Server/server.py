@@ -1,67 +1,54 @@
 from typing import Dict, List, Any, Optional
-
-from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from faster_whisper import WhisperModel
-import uvicorn
-import tempfile
 import os
+# Configure PyTorch caching allocator to automatically manage fragmentation and limit VRAM accumulation without manual empty_cache crashes
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "garbage_collection_threshold:0.6,max_split_size_mb:128"
 import sys
 import re
 import time
+import tempfile
+import argparse
+import soundfile as sf
+import numpy as np
 from dotenv import load_dotenv
+from fastapi import FastAPI, UploadFile, File, Form
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+import uvicorn
 
 # Initialize environment variables
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
-SERVER_HOST: str = os.getenv("HOST", "127.0.0.1")
-SERVER_PORT: int = int(os.getenv("PORT", "8000"))
+# Parse command line arguments
+def parse_args():
+    parser = argparse.ArgumentParser(description="MindMic Whisper Server V2")
+    parser.add_argument("-m", "-M", "--model", "--model-name", type=str, default=None, help="Model to load: parakeet or distil-whisper")
+    parser.add_argument("--host", type=str, default=None, help="Host to bind")
+    parser.add_argument("--port", type=int, default=None, help="Port to bind")
+    args, unknown = parser.parse_known_args()
+    return args
 
-# ── CUDA Library Pre-Loading ───────────────────────────
-# ONLY looks inside the active Python interpreter's venv.
-# No hardcoded pyenv paths. No system paths. Just what's installed.
-import ctypes
-import glob
+args = parse_args()
 
-_venv_sp = os.path.join(
-    sys.prefix,
-    "lib",
-    f"python{sys.version_info.major}.{sys.version_info.minor}",
-    "site-packages",
-    "nvidia",
-)
-_cuda_ok = False
-
-if os.path.isdir(_venv_sp):
-    # Pre-load CUDA shared libs BEFORE importing faster_whisper/ctranslate2.
-    # Setting LD_LIBRARY_PATH via os.environ does NOT work after process start
-    # because the dynamic linker caches it. ctypes.CDLL is the real fix.
-    _libs_to_load = [
-        "cublas/lib/libcublas.so.*",
-        "cublas/lib/libcublasLt.so.*",
-        "cudnn/lib/libcudnn.so.*",
-        "cuda_nvrtc/lib/libnvrtc.so.*",
-        "cuda_runtime/lib/libcudart.so.*",
-    ]
-    _loaded = []
-    for _pat in _libs_to_load:
-        for _f in sorted(glob.glob(os.path.join(_venv_sp, _pat))):
-            try:
-                ctypes.CDLL(_f, mode=ctypes.RTLD_GLOBAL)
-                _loaded.append(os.path.basename(_f))
-            except OSError:
-                pass
-    if _loaded:
-        _cuda_ok = True
-        print(f"✅ CUDA libs preloaded from venv: {', '.join(_loaded)}")
+# Determine model to load: argparse -> env variable -> default "parakeet"
+selected_model_type = "parakeet"
+env_model = os.getenv("WHISPER_MODEL") or os.getenv("MODEL_NAME") or os.getenv("MODEL")
+if env_model:
+    if "distil" in env_model.lower() or "whisper" in env_model.lower():
+        selected_model_type = "distil-whisper"
     else:
-        print("⚠️  nvidia packages installed but no CUDA libs loadable")
-else:
-    print("ℹ️  No nvidia packages in this venv — will use CPU")
+        selected_model_type = "parakeet"
+
+if args.model:
+    if "distil" in args.model.lower() or "whisper" in args.model.lower():
+        selected_model_type = "distil-whisper"
+    else:
+        selected_model_type = "parakeet"
+
+SERVER_HOST: str = args.host or os.getenv("HOST", "127.0.0.1")
+SERVER_PORT: int = int(args.port or os.getenv("PORT", "8000"))
 
 # ── App ────────────────────────────────────────────────
-app = FastAPI(title="MindMic Voice Server", version="2.0.0")
+app = FastAPI(title="MindMic Voice Server V2", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -71,133 +58,124 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Available Models ───────────────────────────────────
-AVAILABLE_MODELS = [
-    {
-        "id": "large-v3-turbo",
-        "name": "Whisper Large v3 Turbo",
-        "params": "809M",
-        "speed": "fastest",
-        "accuracy": "high",
-    },
-    {
-        "id": "large-v3",
-        "name": "Whisper Large v3",
-        "params": "1550M",
-        "speed": "slow",
-        "accuracy": "highest",
-    },
-    {
-        "id": "medium",
-        "name": "Whisper Medium",
-        "params": "769M",
-        "speed": "medium",
-        "accuracy": "good",
-    },
-    {
-        "id": "small",
-        "name": "Whisper Small",
-        "params": "244M",
-        "speed": "fast",
-        "accuracy": "moderate",
-    },
-    {
-        "id": "base",
-        "name": "Whisper Base",
-        "params": "74M",
-        "speed": "fastest",
-        "accuracy": "basic",
-    },
-]
-
-# Quality presets — balanced is default
-QUALITY_PRESETS = {
-    "fast": {"beam_size": 1, "best_of": 1, "temperature": [0.0]},
-    "balanced": {"beam_size": 3, "best_of": 3, "temperature": [0.0, 0.2, 0.4]},
-    "best": {
-        "beam_size": 5,
-        "best_of": 5,
-        "temperature": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
-    },
-}
-
 # ── Model Manager ─────────────────────────────────────
 model = None
-model_name = "large-v3-turbo"
-device_used = "loading"
+model_name = selected_model_type
+device_used = "cpu"
 model_loading = False
 
+# Prompt to enforce proper transcription format, casing, and spacing for Distil-Whisper
+INITIAL_PROMPT = (
+    "Maintain high-quality transcription with perfect spelling, proper casing, "
+    "correct spacing, and complete punctuation (including commas, periods, colons, "
+    "semicolons, question marks, and exclamation marks). Do not ignore any spoken words."
+)
 
-def _try_load(name: str, device: str, compute: str) -> bool:
-    """
-    Attempt to actively instantiate a specific Whisper model weighting on the requested silicon device.
-    
-    Args:
-        name (str): Model key configuration mapping (e.g. `large-v3-turbo`).
-        device (str): Silicon path identifier mapping (e.g. `cuda` or `cpu`).
-        compute (str): Quantization size schema parameter (e.g. `float16` or `int8`).
-        
-    Returns:
-        bool: Exits True confirming load pipeline finished successfully.
-    """
-    global model, model_name, device_used
-    m = WhisperModel(name, device=device, compute_type=compute)
-    model = m
-    model_name = name
-    device_used = device
-    print(f"✅ Model '{name}' loaded on {device} ({compute})")
-    return True
-
-
-def load_model(name: str = "large-v3-turbo") -> None:
-    """
-    Orchestrates the dynamic Whisper model fetching fallback sequence logic.
-    Prioritizes raw CUDA compilation instances natively falling backwards onto CPU mapping
-    gracefully bridging missing driver states.
-    
-    Args:
-        name (str): The requested model path to stream initially.
-    """
-    global model_loading
+def load_model(model_type: str) -> None:
+    global model, model_name, device_used, model_loading
     model_loading = True
     try:
-        # Try CUDA float16
-        try:
-            _try_load(name, "cuda", "float16")
-            return
-        except Exception as e:
-            print(f"⚠️  CUDA float16 failed for '{name}': {e}")
-
-        # Try CPU int8
-        try:
-            _try_load(name, "cpu", "int8")
-            return
-        except Exception as e:
-            print(f"⚠️  CPU int8 failed for '{name}': {e}")
-
-        # Ultimate fallback — base model on CPU
-        if name != "base":
-            print("⚠️  Falling back to 'base' model on CPU")
+        import torch
+        # Disable cuDNN to prevent CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH errors with conflicting virtual environment/system cuDNN libraries
+        torch.backends.cudnn.enabled = False
+        
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device_used = device
+        
+        if model_type == "distil-whisper":
+            from faster_whisper import WhisperModel
+            # Use FP16 on GPU, INT8 on CPU to stay under VRAM
+            compute_type = "float16" if device == "cuda" else "int8"
+            print(f"Loading Distil-Whisper model on {device} ({compute_type})...")
+            model = WhisperModel("Systran/faster-distil-whisper-large-v3", device=device, compute_type=compute_type)
+            model_name = "distil-whisper"
+            print("✅ Distil-Whisper model loaded successfully!")
+        else:
+            # Load NVIDIA Parakeet model
+            print(f"Loading NVIDIA Parakeet model (parakeet-tdt-0.6b-v3) on {device}...")
+            import nemo.collections.asr as nemo_asr
+            model = nemo_asr.models.ASRModel.from_pretrained("nvidia/parakeet-tdt-0.6b-v3")
+            if device == "cuda":
+                model = model.half().cuda()
+            model.eval()
+            model_name = "parakeet"
+            print("✅ NVIDIA Parakeet model loaded successfully!")
+    except Exception as e:
+        print(f"❌ Failed to load model '{model_type}': {e}")
+        # Fallback to CPU loading if CUDA fails
+        if model_type == "distil-whisper":
             try:
-                _try_load("base", "cpu", "int8")
-                return
-            except Exception as e:
-                print(f"❌ All model loads failed: {e}")
+                from faster_whisper import WhisperModel
+                print("Falling back to CPU INT8 for Distil-Whisper...")
+                model = WhisperModel("Systran/faster-distil-whisper-large-v3", device="cpu", compute_type="int8")
+                device_used = "cpu"
+                model_name = "distil-whisper"
+                print("✅ Distil-Whisper loaded on CPU fallback.")
+            except Exception as ex:
+                print(f"❌ Fallback failed: {ex}")
+                sys.exit(1)
+        else:
+            try:
+                print("Falling back to CPU for NVIDIA Parakeet...")
+                import nemo.collections.asr as nemo_asr
+                model = nemo_asr.models.ASRModel.from_pretrained("nvidia/parakeet-tdt-0.6b-v2")
+                model.eval()
+                device_used = "cpu"
+                model_name = "parakeet"
+                print("✅ NVIDIA Parakeet loaded on CPU fallback.")
+            except Exception as ex:
+                print(f"❌ Fallback failed: {ex}")
                 sys.exit(1)
     finally:
         model_loading = False
 
+# Load the selected model on startup
+load_model(selected_model_type)
 
-# Load default on startup
-load_model()
+# ── Simple VAD (Silence Detection) ──
+def is_silent(audio_path: str, threshold: float = 0.005) -> bool:
+    """
+    Check if the audio file is silent using energy thresholding.
+    Helps prevent transcribing empty clicks or background hums.
+    """
+    try:
+        data, samplerate = sf.read(audio_path)
+        if len(data) == 0:
+            return True
+        rms = np.sqrt(np.mean(data**2))
+        return rms < threshold
+    except Exception:
+        return False  # Transcribe if VAD check fails
 
+# ── Audio Preprocessing via FFmpeg ──
+def preprocess_audio(input_path: str) -> str:
+    """
+    Converts any input audio file to a 16kHz mono WAV file
+    using ffmpeg, which is required by NeMo and Whisper.
+    """
+    out_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+    out_path = out_file.name
+    out_file.close()
+    
+    try:
+        import subprocess
+        # Convert to 16kHz, mono, 16-bit PCM WAV
+        cmd = [
+            "ffmpeg", "-y", "-i", input_path,
+            "-ar", "16000", "-ac", "1",
+            "-acodec", "pcm_s16le", out_path
+        ]
+        # Run ffmpeg, suppressing output
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        return out_path
+    except Exception as e:
+        print(f"⚠️  ffmpeg preprocessing failed: {e}")
+        return input_path
 
 # ── Endpoints ──────────────────────────────────────────
 
-
 @app.get("/health")
 async def health() -> Dict[str, Any]:
-    """Provide isolated heartbeat checks tracing active compilation layers inside FastAPI."""
     return {
         "status": "ok",
         "model": model_name,
@@ -205,35 +183,47 @@ async def health() -> Dict[str, Any]:
         "loading": model_loading,
     }
 
-
 @app.get("/models")
 async def list_models() -> Dict[str, Any]:
-    """Retrieve structurally permitted standard model arrays identifying backend parameters."""
-    models: List[Dict[str, Any]] = []
-    for m in AVAILABLE_MODELS:
-        models.append({**m, "active": m["id"] == model_name})
-    return {"models": models, "active": model_name, "device": device_used}
-
+    return {
+        "models": [
+            {
+                "id": "parakeet",
+                "name": "NVIDIA Parakeet (TDT 0.6B)",
+                "params": "600M",
+                "speed": "fastest",
+                "accuracy": "very_high",
+                "active": model_name == "parakeet"
+            },
+            {
+                "id": "distil-whisper",
+                "name": "Distil-Whisper Large v3",
+                "params": "756M",
+                "speed": "fast",
+                "accuracy": "high",
+                "active": model_name == "distil-whisper"
+            }
+        ],
+        "active": model_name,
+        "device": device_used
+    }
 
 @app.post("/model")
 async def change_model(body: Dict[str, str]) -> Any:
-    """
-    Hot-swap runtime Whisper models mapping dynamically inside global CUDA layouts.
-    Will gracefully crash-block invalid strings.
-    """
-    new_model: str = body.get("model", "").strip()
-    valid_ids: List[str] = [m["id"] for m in AVAILABLE_MODELS]
-    if new_model not in valid_ids:
-        return JSONResponse(
-            status_code=400,
-            content={"error": f"Unknown model '{new_model}'. Valid: {valid_ids}"},
-        )
-    if new_model == model_name and not model_loading:
+    new_model: str = body.get("model", "").strip().lower()
+    if not new_model:
+        return JSONResponse(status_code=400, content={"error": "Model name cannot be empty"})
+    
+    target_type = "distil-whisper" if "distil" in new_model or "whisper" in new_model else "parakeet"
+    
+    if target_type == model_name and not model_loading:
         return {"status": "already_loaded", "model": model_name, "device": device_used}
-
-    load_model(new_model)
-    return {"status": "loaded", "model": model_name, "device": device_used}
-
+        
+    try:
+        load_model(target_type)
+        return {"status": "loaded", "model": model_name, "device": device_used}
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": f"Failed to load: {str(e)}"})
 
 @app.post("/transcribe")
 async def transcribe(
@@ -242,132 +232,150 @@ async def transcribe(
     quality: str = Form("balanced"),
     mode: str = Form("none"),
 ) -> Any:
-    """
-    Core transcription pipe logic processing bytes streams actively parsing against loaded engines.
-    """
     global model, model_name, device_used
-
+    
     audio_bytes = await file.read()
-
-    # Guard: reject tiny recordings (likely accidental clicks)
     if len(audio_bytes) < 1024:
-        return {"text": "", "language": "", "duration": 0, "skipped": "too_short"}
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as tmp:
+        return {"text": "", "language": "en", "duration": 0, "skipped": "too_short"}
+        
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
         tmp.write(audio_bytes)
         tmp_path = tmp.name
-
+        
+    wav_path = None
     try:
-        lang = language if language and language != "auto" else None
-        preset = QUALITY_PRESETS.get(quality, QUALITY_PRESETS["balanced"])
-
+        # Preprocess using FFmpeg to 16kHz mono WAV
+        wav_path = preprocess_audio(tmp_path)
+        
+        # Get duration using soundfile
+        audio_info = sf.info(wav_path)
+        duration = round(audio_info.duration, 2)
+        
+        # Simple VAD guard
+        if is_silent(wav_path):
+            return {"text": "", "language": "en", "duration": duration, "skipped": "silent"}
+            
         t0 = time.time()
-
-        segments, info = model.transcribe(
-            tmp_path,
-            language=lang,
-            beam_size=preset["beam_size"],
-            best_of=preset["best_of"],
-            temperature=preset["temperature"],
-            vad_filter=True,
-            vad_parameters={
-                "min_silence_duration_ms": 300,
-                "speech_pad_ms": 200,
-            },
-            condition_on_previous_text=False,  # prevent hallucination loops
-            no_speech_threshold=0.5,
-            hallucination_silence_threshold=2.0,
-            suppress_blank=True,
-        )
-
-        text = " ".join(seg.text for seg in segments).strip()
+        
+        if model_name == "distil-whisper":
+            # Distil-Whisper inference
+            segments, info = model.transcribe(
+                wav_path,
+                language="en",
+                beam_size=5,
+                vad_filter=True,
+                initial_prompt=INITIAL_PROMPT,
+            )
+            text = " ".join(seg.text for seg in segments).strip()
+            detected_lang = info.language
+        else:
+            # NVIDIA Parakeet inference
+            transcriptions = model.transcribe([wav_path])
+            if isinstance(transcriptions, list) and len(transcriptions) > 0:
+                res = transcriptions[0]
+                if hasattr(res, "text"):
+                    text = res.text.strip()
+                else:
+                    text = str(res).strip()
+            else:
+                text = ""
+            detected_lang = "en"
+            
         elapsed = round(time.time() - t0, 2)
-
+        
         # ── Mode Post-Processing ──
         if mode == "command" and text:
             text = process_voice_commands(text)
-
+            
+        # Capitalization & formatting
+        text = clean_formatting_and_capitalization(text)
+        
         return {
             "text": text,
-            "language": info.language,
-            "duration": round(info.duration, 2),
+            "language": detected_lang,
+            "duration": duration,
             "processing_time": elapsed,
             "quality": quality,
         }
-
-    except RuntimeError as e:
-        err = str(e)
-        if "libcublas" in err or "cuda" in err.lower() or "cublas" in err.lower():
-            print(f"⚠️  CUDA runtime error, FORCING CPU fallback: {err}")
-            try:
-                # Force CPU directly — do NOT call load_model() which tries CUDA first!
-                model = WhisperModel(model_name, device="cpu", compute_type="int8")
-                device_used = "cpu"
-                print(f"✅ Forced CPU reload of '{model_name}'")
-                # Retry transcription on CPU
-                segments, info = model.transcribe(
-                    tmp_path,
-                    language=lang,
-                    beam_size=3,
-                    vad_filter=True,
-                    condition_on_previous_text=False,
-                )
-                text = " ".join(seg.text for seg in segments).strip()
-                if mode == "command" and text:
-                    text = process_voice_commands(text)
-                return {
-                    "text": text,
-                    "language": info.language,
-                    "duration": round(info.duration, 2),
-                }
-            except Exception as e2:
-                return JSONResponse(
-                    status_code=500, content={"error": f"CPU fallback failed: {e2}"}
-                )
-        return JSONResponse(status_code=500, content={"error": err})
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
     finally:
+        # Cleanup temporary files
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
+        if wav_path and wav_path != tmp_path:
+            try:
+                os.unlink(wav_path)
+            except OSError:
+                pass
 
+# ── Voice Command Processing ──
 
-# ── Voice Command Processing (Client-side primary, server fallback) ──
+VOICE_COMMAND_MAPPING = [
+    (r"\bnew\s*paragraphs?\b", "\n\n"),
+    (r"\bnew\s*lines?\b", "\n"),
+    (r"\bnext\s*lines?\b", "\n"),
+    (r"\bperiods?\b", "."),
+    (r"\bfull\s*stops?\b", "."),
+    (r"\bcommas?\b", ","),
+    (r"\bquestion\s*marks?\b", "?"),
+    (r"\bexclamation\s*(marks?|points?)\b", "!"),
+    (r"\bcolons?\b", ":"),
+    (r"\bsemicolons?\b", ";"),
+    (r"\bdashes?\b", "—"),
+    (r"\bhyphens?\b", "-"),
+    (r"\b(open|start)\s*quotes?\b", '"'),
+    (r"\b(close|end)\s*quotes?\b", '"'),
+    (r"\bopen\s*(parenthes(is|es)|brackets?)\b", "("),
+    (r"\bclose\s*(parenthes(is|es)|brackets?)\b", ")"),
+]
 
-VOICE_COMMANDS = {
-    r"\bnew line\b": "\n",
-    r"\bnew paragraph\b": "\n\n",
-    r"\bperiod\b": ".",
-    r"\bfull stop\b": ".",
-    r"\bcomma\b": ",",
-    r"\bquestion mark\b": "?",
-    r"\bexclamation mark\b": "!",
-    r"\bexclamation point\b": "!",
-    r"\bcolon\b": ":",
-    r"\bsemicolon\b": ";",
-    r"\bdash\b": "—",
-    r"\bhyphen\b": "-",
-    r"\bopen quote\b": '"',
-    r"\bclose quote\b": '"',
-    r"\bopen parenthesis\b": "(",
-    r"\bclose parenthesis\b": ")",
-}
+def capitalize_sentences(text: str) -> str:
+    if not text:
+        return text
+    chars = list(text)
+    capitalize_next = True
+    for i in range(len(chars)):
+        if capitalize_next and chars[i].isalpha():
+            chars[i] = chars[i].upper()
+            capitalize_next = False
+        elif chars[i] in ['.', '!', '?']:
+            if i + 1 == len(chars) or chars[i+1].isspace() or chars[i+1] in ['"', ')']:
+                capitalize_next = True
+        elif chars[i] == '\n':
+            capitalize_next = True
+    return "".join(chars)
 
-
-def process_voice_commands(text: str) -> str:
-    """Replace spoken punctuation/commands with actual characters."""
+def clean_formatting_and_capitalization(text: str) -> str:
+    if not text:
+        return text
     result = text
-    for pattern, replacement in VOICE_COMMANDS.items():
-        result = re.sub(pattern, replacement, result, flags=re.IGNORECASE)
-    # Clean up extra spaces around punctuation
     result = re.sub(r"\s+([.,!?;:)\]])", r"\1", result)
     result = re.sub(r"([\[(])\s+", r"\1", result)
+    result = re.sub(r"\(\s*([^)]+?)\s*\)", r"(\1)", result)
+    result = re.sub(r'\s*"\s*([^"]+?)\s*"\s*', r' " \1 " ', result)
+    result = re.sub(r'\s*"\s*([^"]+?)\s*"\s*', r' "\1" ', result)
+    result = re.sub(r" +", " ", result)
+    result = capitalize_sentences(result)
+    
+    # Line breaks cleanup
+    lines = result.split('\n')
+    cleaned_lines = [line.strip() for line in lines]
+    result = '\n'.join(cleaned_lines)
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    result = capitalize_sentences(result)
     return result.strip()
 
+def process_voice_commands(text: str) -> str:
+    if not text:
+        return text
+    result = text
+    for pattern, replacement in VOICE_COMMAND_MAPPING:
+        result = re.sub(pattern, replacement, result, flags=re.IGNORECASE)
+    return result
 
-# ── Main ───────────────────────────────────────────────
 if __name__ == "__main__":
-    print(f"Spinning up Uvicorn dynamically tied against {SERVER_HOST}:{SERVER_PORT}")
+    print(f"Spinning up Uvicorn V2 tied against {SERVER_HOST}:{SERVER_PORT}")
     uvicorn.run(app, host=SERVER_HOST, port=SERVER_PORT)

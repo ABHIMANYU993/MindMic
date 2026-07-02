@@ -125,7 +125,7 @@
       } else {
         state.savedCursor = { s: el.selectionStart ?? 0, e: el.selectionEnd ?? 0 };
       }
-    } catch (_) {}
+    } catch (_) { }
   }
 
   function restoreCursor() {
@@ -143,7 +143,7 @@
         el.focus();
         el.setSelectionRange(state.savedCursor.s, state.savedCursor.e);
       }
-    } catch (_) {}
+    } catch (_) { }
   }
 
   /**
@@ -171,8 +171,8 @@
       g.gain.linearRampToValueAtTime(0, c.currentTime + 0.15);
       o.start();
       o.stop(c.currentTime + 0.2);
-      setTimeout(() => c.close().catch(() => {}), 500);
-    } catch (_) {}
+      setTimeout(() => c.close().catch(() => { }), 500);
+    } catch (_) { }
   }
 
   /* ══════════════════════════════════════════════════════
@@ -843,7 +843,7 @@
         if (state.micDevice === d.deviceId) o.selected = true;
         sel1.appendChild(o);
       })
-    ).catch(() => {});
+    ).catch(() => { });
 
     sel1.addEventListener("change", () => {
       state.micDevice = sel1.value;
@@ -873,6 +873,7 @@
         ["medium", "Whisper Medium (balanced)"],
         ["small", "Whisper Small (fast)"],
         ["base", "Whisper Base (fastest, basic)"],
+        ["nyrahealth/faster_CrisperWhisper", "Whisper Faster Crisper (fastest, high accuracy)"],
       ].forEach(([v, t]) => {
         const o = mk("option");
         o.value = v;
