@@ -388,15 +388,6 @@ async def transcribe(
                 os.unlink(wav_path)
             except OSError:
                 pass
-        
-        # Hard-reset VRAM back to exactly the pristine initial state
-        if torch.cuda.is_available():
-            try:
-                import gc
-                gc.collect()
-                torch.cuda.empty_cache()
-            except Exception:
-                pass
 
 # ── Voice Command Processing ──
 
