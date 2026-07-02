@@ -282,23 +282,48 @@ async def transcribe(
                 else:
                     text = ""
             else:
-                import math
+                import numpy as np
                 import torch
                 
                 chunk_paths = []
                 data, sr = sf.read(wav_path)
-                chunk_samples = int(chunk_duration * sr)
-                num_chunks = math.ceil(len(data) / chunk_samples)
+                
+                max_chunk_samples = int(chunk_duration * sr)
+                search_window_samples = int(10.0 * sr) 
+                silence_window_samples = int(0.2 * sr)
+                step = int(0.05 * sr)
+                
+                current_start = 0
+                total_samples = len(data)
                 
                 try:
-                    for i in range(num_chunks):
-                        start = i * chunk_samples
-                        end = min((i + 1) * chunk_samples, len(data))
-                        chunk_data = data[start:end]
+                    while current_start < total_samples:
+                        remaining = total_samples - current_start
+                        if remaining <= max_chunk_samples:
+                            end = total_samples
+                        else:
+                            search_start = max(current_start + max_chunk_samples - search_window_samples, current_start + silence_window_samples)
+                            search_end = current_start + max_chunk_samples
+                            
+                            best_split = search_end
+                            min_energy = float('inf')
+                            
+                            for w_start in range(search_start, search_end - silence_window_samples, step):
+                                window = data[w_start : w_start + silence_window_samples]
+                                energy = np.mean(window**2)
+                                if energy < min_energy:
+                                    min_energy = energy
+                                    best_split = w_start + (silence_window_samples // 2)
+                                    
+                            end = best_split
+                            
+                        chunk_data = data[current_start:end]
                         fd, temp_path = tempfile.mkstemp(suffix=".wav")
                         os.close(fd)
                         sf.write(temp_path, chunk_data, sr)
                         chunk_paths.append(temp_path)
+                        
+                        current_start = end
                     
                     texts = []
                     # Process sequentially strictly dropping references
