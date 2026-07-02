@@ -1,7 +1,7 @@
 from typing import Dict, List, Any, Optional
 import os
 # Configure PyTorch caching allocator to automatically manage fragmentation and limit VRAM accumulation without manual empty_cache crashes
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "garbage_collection_threshold:0.22,max_split_size_mb:128,expandable_segments:True"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "garbage_collection_threshold:0.15,max_split_size_mb:128,expandable_segments:True"
 import sys
 import re
 import time
@@ -131,6 +131,13 @@ def load_model(model_type: str) -> None:
 
 # Load the selected model on startup
 load_model(selected_model_type)
+
+# Fix startup 6.1GB VRAM spike by forcibly purging initialization buffers
+import gc
+import torch
+if torch.cuda.is_available():
+    gc.collect()
+    torch.cuda.empty_cache()
 
 # ── Simple VAD (Silence Detection) ──
 def is_silent(audio_path: str, threshold: float = 0.005) -> bool:
