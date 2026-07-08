@@ -141,6 +141,24 @@ class MindMicDaemon:
                 self.stream.stop_stream()
                 self.stream.close()
 
+    async def get_active_window_class(self) -> str:
+        """
+        Queries hyprctl to retrieve the class of the currently focused window.
+        """
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "hyprctl", "activewindow", "-j",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            stdout, _ = await proc.communicate()
+            if proc.returncode == 0 and stdout:
+                data = json.loads(stdout.decode("utf-8"))
+                return data.get("class", "").lower()
+        except Exception as e:
+            print(f"[Hyprctl] Error fetching active window class: {e}")
+        return ""
+
     async def toggle(self, mode: str) -> None:
         """
         Primary toggle router triggered across internal UI callbacks or CLI hooks.
@@ -200,7 +218,57 @@ class MindMicDaemon:
                             if text:
                                 # Small delay to ensure physical modifier keys (like SUPER) are released
                                 await asyncio.sleep(0.4)
-                                subprocess.run(["wtype", "--", text], check=False)
+                                
+                                # Copy text to standard clipboard and primary selection
+                                try:
+                                    # Copy to clipboard
+                                    proc_clip = await asyncio.create_subprocess_exec(
+                                        "wl-copy",
+                                        stdin=subprocess.PIPE
+                                    )
+                                    await proc_clip.communicate(input=text.encode("utf-8"))
+                                    
+                                    # Copy to primary selection
+                                    proc_prim = await asyncio.create_subprocess_exec(
+                                        "wl-copy", "--primary",
+                                        stdin=subprocess.PIPE
+                                    )
+                                    await proc_prim.communicate(input=text.encode("utf-8"))
+                                except Exception as e:
+                                    print(f"[wl-clipboard] Error copying text: {e}")
+                                
+                                # Detect the active window class
+                                window_class = await self.get_active_window_class()
+                                
+                                # Choose the appropriate paste shortcut
+                                terminal_classes = {
+                                    "kitty", "alacritty", "foot", "wezterm", "konsole", 
+                                    "gnome-terminal", "xfce4-terminal", "urxvt", "xterm", 
+                                    "termite", "rio", "ghostty"
+                                }
+                                is_terminal = any(term in window_class for term in terminal_classes)
+                                
+                                # Simulate paste keypress
+                                try:
+                                    if is_terminal:
+                                        # Use Ctrl+Shift+V for terminals
+                                        proc_paste = await asyncio.create_subprocess_exec(
+                                            "wtype",
+                                            "-M", "ctrl", "-M", "shift",
+                                            "-k", "v",
+                                            "-m", "shift", "-m", "ctrl"
+                                        )
+                                    else:
+                                        # Use Ctrl+V for standard GUI applications
+                                        proc_paste = await asyncio.create_subprocess_exec(
+                                            "wtype",
+                                            "-M", "ctrl",
+                                            "-k", "v",
+                                            "-m", "ctrl"
+                                        )
+                                    await proc_paste.wait()
+                                except Exception as e:
+                                    print(f"[wtype] Failed to paste: {e}")
                 except Exception as e:
                     print(f"[Network] Transcription process error context: {e}")
 
