@@ -1,9 +1,0 @@
-fastapi
-uvicorn
-python-multipart
-faster-whisper
-nvidia-cublas-cu12
-nvidia-cudnn-cu12==9.*
-nvidia-cuda-nvrtc-cu12
-nvidia-cuda-runtime-cu12
-python-dotenv==1.0.1
