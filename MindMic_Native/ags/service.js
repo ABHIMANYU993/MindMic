@@ -133,7 +133,10 @@ class MindMicService extends Service {
     const client = new Gio.SocketClient();
     try {
       const connection = client.connect_to_host(DAEMON_HOST, AGS_TCP_PORT, null);
-      if (!connection) return;
+      if (!connection) {
+        Utils.timeout(2000, () => this._startBridge());
+        return;
+      }
 
       const istream = connection.get_input_stream();
       const dstream = new Gio.DataInputStream({ base_stream: istream });
@@ -171,7 +174,9 @@ class MindMicService extends Service {
         });
       };
       readLoop();
-    } catch (e) { }
+    } catch (e) {
+      Utils.timeout(2000, () => this._startBridge());
+    }
   }
 }
 
