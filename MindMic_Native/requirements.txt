@@ -3,3 +3,4 @@ PyAudio==0.2.14
 PyGObject==3.48.2
 python-dotenv==1.0.1
 numpy
+aiohttp

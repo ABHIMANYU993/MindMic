@@ -15,10 +15,13 @@ import pyaudio
 import numpy as np
 import transcribe_cpp
 import concurrent.futures
+import tempfile
+from aiohttp import web
 
 # --- SYSTEM DEFAULTS & GLOBALS ---
 MODEL_PATH: str = os.getenv("MODEL_PATH", "parakeet.gguf")
 DAEMON_HOST: str = os.getenv("DAEMON_HOST", "127.0.0.1")
+HTTP_PORT: int = int(os.getenv("HTTP_PORT", "8000"))
 WS_PORT: int = int(os.getenv("AGS_TCP_PORT", "8765"))
 CLI_PORT: int = int(os.getenv("CLI_TCP_PORT", "8766"))
 
@@ -120,6 +123,64 @@ class MindMicDaemon:
         level: float = (rms / 32768.0) * 8.0
         return min(1.0, level)
 
+    def _chunk_and_transcribe(self, audio_float32: np.ndarray) -> str:
+        """
+        Zero-IO silence-aware numpy chunker for bounding model KV-cache VRAM usage.
+        Splits audio logically on silence boundaries to prevent OOM on long inferences.
+        """
+        sr = 16000
+        chunk_duration = 35.0
+        max_chunk_samples = int(chunk_duration * sr)
+        total_samples = len(audio_float32)
+        
+        # Fast path for short audio
+        if total_samples <= max_chunk_samples:
+            with self.model.session() as session:
+                result = session.run(audio_float32)
+                return result.text.strip()
+                
+        texts = []
+        current_start = 0
+        
+        while current_start < total_samples:
+            remaining_samples = total_samples - current_start
+            
+            if remaining_samples <= max_chunk_samples:
+                best_split = total_samples
+            else:
+                # Scan backwards from max chunk limit to find silence
+                window_end = current_start + max_chunk_samples
+                scan_duration = 10.0
+                scan_samples = int(scan_duration * sr)
+                window_start = max(current_start, window_end - scan_samples)
+                
+                # We need to find the 0.2s window with lowest RMS energy
+                energy_window_samples = int(0.2 * sr)
+                step_samples = int(0.05 * sr)
+                
+                best_split = window_end
+                lowest_energy = float('inf')
+                
+                # Scan backwards to prefer splits closer to the end of the max chunk
+                for i in range(window_end - energy_window_samples, window_start - 1, -step_samples):
+                    slice_window = audio_float32[i:i + energy_window_samples]
+                    energy = np.mean(slice_window**2)
+                    
+                    if energy < lowest_energy:
+                        lowest_energy = energy
+                        best_split = i + energy_window_samples // 2
+                        
+            chunk_data = audio_float32[current_start:best_split]
+            
+            # Fresh session for every chunk to destroy KV-cache and free VRAM
+            with self.model.session() as session:
+                result = session.run(chunk_data)
+                texts.append(result.text.strip())
+                
+            current_start = best_split
+            
+        return " ".join(t for t in texts if t).strip()
+
     async def record_audio(self) -> None:
         """
         Activates the main microphone stream recording sequence capturing buffers.
@@ -202,9 +263,7 @@ class MindMicDaemon:
                 raw_bytes = b"".join(self.frames)
                 audio_int16 = np.frombuffer(raw_bytes, dtype=np.int16)
                 audio_float32 = audio_int16.astype(np.float32) / 32768.0
-                with self.model.session() as session:
-                    result = session.run(audio_float32)
-                    return result.text
+                return self._chunk_and_transcribe(audio_float32)
 
             try:
                 loop = asyncio.get_running_loop()
@@ -270,6 +329,77 @@ class MindMicDaemon:
             # Restore pipeline closure back mapping to default standard
             self.state = "idle"
             await self.broadcast_state()
+
+    async def handle_transcribe(self, request: web.Request) -> web.Response:
+        """
+        Isolated HTTP endpoint for parsing audio file uploads (mp3/wav), 
+        decoding via ffmpeg, and running through the VRAM-locked model.
+        """
+        reader = await request.multipart()
+        field = await reader.next()
+        
+        if field is None:
+            return web.json_response({"error": "No file uploaded"}, status=400)
+        
+        filename = field.filename
+        if not filename:
+            return web.json_response({"error": "Empty filename"}, status=400)
+
+        # Write uploaded file to temporary storage securely
+        fd, temp_input_path = tempfile.mkstemp(suffix="_mindmic_upload")
+        try:
+            with os.fdopen(fd, 'wb') as f:
+                while True:
+                    chunk = await field.read_chunk()
+                    if not chunk:
+                        break
+                    f.write(chunk)
+            
+            # Spawn ffmpeg to convert to 16kHz float32 mono stream natively
+            ffmpeg_proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-i", temp_input_path, 
+                "-f", "f32le", "-ac", "1", "-ar", "16000", "-",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            
+            stdout_data, stderr_data = await ffmpeg_proc.communicate()
+            if ffmpeg_proc.returncode != 0:
+                print(f"[HTTP] FFmpeg error: {stderr_data.decode()}")
+                return web.json_response({"error": "Failed to decode audio file"}, status=400)
+            
+            # Map bytes directly into numpy array for ggml
+            audio_float32 = np.frombuffer(stdout_data, dtype=np.float32)
+            
+            def _run_inference_http() -> str:
+                return self._chunk_and_transcribe(audio_float32)
+
+            # Execute model on background thread to prevent blocking asyncio
+            loop = asyncio.get_running_loop()
+            raw_text = await loop.run_in_executor(None, _run_inference_http)
+            text = raw_text.strip()
+            
+            return web.json_response({"text": text})
+            
+        except Exception as e:
+            print(f"[HTTP] Transcribe endpoint error: {e}")
+            return web.json_response({"error": str(e)}, status=500)
+        finally:
+            if os.path.exists(temp_input_path):
+                os.remove(temp_input_path)
+
+    async def http_server(self) -> web.AppRunner:
+        """
+        Instantiates the aiohttp application mapping and starts the site runner.
+        """
+        app = web.Application()
+        app.router.add_post("/transcribe", self.handle_transcribe)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, DAEMON_HOST, HTTP_PORT)
+        await site.start()
+        print(f"[MindMic] HTTP Server engaged on {DAEMON_HOST}:{HTTP_PORT}/transcribe")
+        return runner
 
     # -----------------------------
     # NETWORK SERVERS & EVENT LOOPS
@@ -342,9 +472,13 @@ class MindMicDaemon:
         """Bootstraps networking instances tying to event loop and listens indefinitely."""
         ags_server = await asyncio.start_server(self.ui_server, DAEMON_HOST, WS_PORT)
         cli_server = await asyncio.start_server(self.cli_server, DAEMON_HOST, CLI_PORT)
+        http_runner = await self.http_server()
         
         print(f"[MindMic] Enterprise Native Daemon engaged successfully against {DAEMON_HOST} on explicit ports.")
-        await asyncio.gather(ags_server.serve_forever(), cli_server.serve_forever())
+        try:
+            await asyncio.gather(ags_server.serve_forever(), cli_server.serve_forever())
+        finally:
+            await http_runner.cleanup()
 
 
 if __name__ == "__main__":
