@@ -128,23 +128,60 @@ class MindMicDaemon:
 
     def _streaming_worker(self, audio_queue: queue.Queue, result_container: dict) -> None:
         """
-        Synchronous background worker consuming live audio chunks from the microphone,
-        feeding them directly to the C++ transcribe stream.
+        Synchronous background worker consuming live audio chunks from the microphone.
+        Attempts direct C++ stream feeding, falling back to batch inference if the 
+        loaded model does not implement the streaming API.
         """
-        with self.model.session() as session, session.stream() as stream:
+        audio_chunks = []
+        stream_active = False
+        stream = None
+        session = None
+        
+        try:
+            session = self.model.session()
+            session.__enter__()
+            stream = session.stream()
+            stream.__enter__()
+            stream_active = True
+        except Exception as e:
+            print(f"[Core] Streaming not supported by model, falling back to batch threaded mode.")
+        
+        try:
             while True:
                 item = audio_queue.get()
                 if item is None:
                     break
-                stream.feed(item)
+                
+                if stream_active:
+                    stream.feed(item)
+                else:
+                    audio_chunks.append(item)
+                    
                 audio_queue.task_done()
             
-            stream.finalize()
-            text_obj = stream.text()
-            text_str = text_obj.committed if hasattr(text_obj, "committed") else str(text_obj)
-            result_container["text"] = text_str.strip()
+            text_str = ""
+            if stream_active:
+                stream.finalize()
+                text_obj = stream.text()
+                text_str = text_obj.committed if hasattr(text_obj, "committed") else str(text_obj)
+                text_str = text_str.strip()
+            elif audio_chunks:
+                full_audio = np.concatenate(audio_chunks)
+                result = session.run(full_audio)
+                text_str = result.text.strip()
+                
+            result_container["text"] = text_str
             
-            # Mark the None sentinel as done to unblock audio_queue.join()
+        except Exception as e:
+            print(f"[Streaming Worker] Error: {e}")
+            result_container["text"] = ""
+        finally:
+            if stream_active and stream:
+                stream.__exit__(None, None, None)
+            if session:
+                session.__exit__(None, None, None)
+            
+            # Ensure the None sentinel is marked as done
             audio_queue.task_done()
 
     async def record_audio(self) -> None:
