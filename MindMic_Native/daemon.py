@@ -4,6 +4,8 @@ import math
 import struct
 import subprocess
 import os
+import queue
+import threading
 from typing import List, Optional, Dict, Any
 
 from dotenv import load_dotenv
@@ -19,7 +21,8 @@ import tempfile
 from aiohttp import web
 
 # --- SYSTEM DEFAULTS & GLOBALS ---
-MODEL_PATH: str = os.getenv("MODEL_PATH", "parakeet.gguf")
+MODEL_PATH: str = os.getenv("MODEL_PATH", "../Whisper_Server/models/parakeet.gguf")
+TRANSCRIBE_CLI: str = os.getenv("TRANSCRIBE_CLI", "../Whisper_Server/transcribe.cpp/build/bin/transcribe-cli")
 DAEMON_HOST: str = os.getenv("DAEMON_HOST", "127.0.0.1")
 HTTP_PORT: int = int(os.getenv("HTTP_PORT", "8000"))
 WS_PORT: int = int(os.getenv("AGS_TCP_PORT", "8765"))
@@ -123,63 +126,26 @@ class MindMicDaemon:
         level: float = (rms / 32768.0) * 8.0
         return min(1.0, level)
 
-    def _chunk_and_transcribe(self, audio_float32: np.ndarray) -> str:
+    def _streaming_worker(self, audio_queue: queue.Queue, result_container: dict) -> None:
         """
-        Zero-IO silence-aware numpy chunker for bounding model KV-cache VRAM usage.
-        Splits audio logically on silence boundaries to prevent OOM on long inferences.
+        Synchronous background worker consuming live audio chunks from the microphone,
+        feeding them directly to the C++ transcribe stream.
         """
-        sr = 16000
-        chunk_duration = 35.0
-        max_chunk_samples = int(chunk_duration * sr)
-        total_samples = len(audio_float32)
-        
-        # Fast path for short audio
-        if total_samples <= max_chunk_samples:
-            with self.model.session() as session:
-                result = session.run(audio_float32)
-                return result.text.strip()
-                
-        texts = []
-        current_start = 0
-        
-        while current_start < total_samples:
-            remaining_samples = total_samples - current_start
+        with self.model.session() as session, session.stream() as stream:
+            while True:
+                item = audio_queue.get()
+                if item is None:
+                    break
+                stream.feed(item)
+                audio_queue.task_done()
             
-            if remaining_samples <= max_chunk_samples:
-                best_split = total_samples
-            else:
-                # Scan backwards from max chunk limit to find silence
-                window_end = current_start + max_chunk_samples
-                scan_duration = 10.0
-                scan_samples = int(scan_duration * sr)
-                window_start = max(current_start, window_end - scan_samples)
-                
-                # We need to find the 0.2s window with lowest RMS energy
-                energy_window_samples = int(0.2 * sr)
-                step_samples = int(0.05 * sr)
-                
-                best_split = window_end
-                lowest_energy = float('inf')
-                
-                # Scan backwards to prefer splits closer to the end of the max chunk
-                for i in range(window_end - energy_window_samples, window_start - 1, -step_samples):
-                    slice_window = audio_float32[i:i + energy_window_samples]
-                    energy = np.mean(slice_window**2)
-                    
-                    if energy < lowest_energy:
-                        lowest_energy = energy
-                        best_split = i + energy_window_samples // 2
-                        
-            chunk_data = audio_float32[current_start:best_split]
+            stream.finalize()
+            text_obj = stream.text()
+            text_str = text_obj.committed if hasattr(text_obj, "committed") else str(text_obj)
+            result_container["text"] = text_str.strip()
             
-            # Fresh session for every chunk to destroy KV-cache and free VRAM
-            with self.model.session() as session:
-                result = session.run(chunk_data)
-                texts.append(result.text.strip())
-                
-            current_start = best_split
-            
-        return " ".join(t for t in texts if t).strip()
+            # Mark the None sentinel as done to unblock audio_queue.join()
+            audio_queue.task_done()
 
     async def record_audio(self) -> None:
         """
@@ -203,6 +169,10 @@ class MindMicDaemon:
                 
                 # Emit rendering level updates automatically
                 level: float = self.calculate_rms(data)
+                
+                audio_float32 = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+                self.audio_queue.put(audio_float32)
+
                 await self.broadcast_level(level)
                 await asyncio.sleep(0.01)
         except Exception as e:
@@ -243,6 +213,13 @@ class MindMicDaemon:
         # Transition Idle -> Recording
         if self.state in ["idle", "expanded"]:
             self.state = "recording"
+            self.audio_queue = queue.Queue()
+            self.stream_result = {}
+            threading.Thread(
+                target=self._streaming_worker, 
+                args=(self.audio_queue, self.stream_result), 
+                daemon=True
+            ).start()
             await self.broadcast_state()
             asyncio.create_task(self.record_audio())
 
@@ -253,22 +230,18 @@ class MindMicDaemon:
                 print(f"[Core] Recording too short ({len(self.frames)} frames), discarding.")
                 self.frames.clear()
                 self.state = "idle"
+                self.audio_queue.put(None)
                 await self.broadcast_state()
                 return
 
             self.state = "transcribing"
+            self.audio_queue.put(None)
             await self.broadcast_state()
-
-            def _run_inference() -> str:
-                raw_bytes = b"".join(self.frames)
-                audio_int16 = np.frombuffer(raw_bytes, dtype=np.int16)
-                audio_float32 = audio_int16.astype(np.float32) / 32768.0
-                return self._chunk_and_transcribe(audio_float32)
 
             try:
                 loop = asyncio.get_running_loop()
-                raw_text = await loop.run_in_executor(None, _run_inference)
-                text = raw_text.strip()
+                await loop.run_in_executor(None, self.audio_queue.join)
+                text = self.stream_result.get("text", "")
                 if text:
                     # Small delay to ensure physical modifier keys (like SUPER) are released
                     await asyncio.sleep(0.4)
@@ -347,6 +320,8 @@ class MindMicDaemon:
 
         # Write uploaded file to temporary storage securely
         fd, temp_input_path = tempfile.mkstemp(suffix="_mindmic_upload")
+        fd2, temp_audio_wav = tempfile.mkstemp(suffix="_mindmic_audio.wav")
+        os.close(fd2)  # We just need the path
         try:
             with os.fdopen(fd, 'wb') as f:
                 while True:
@@ -355,10 +330,10 @@ class MindMicDaemon:
                         break
                     f.write(chunk)
             
-            # Spawn ffmpeg to convert to 16kHz float32 mono stream natively
+            # Spawn ffmpeg to convert to 16kHz wav on disk
             ffmpeg_proc = await asyncio.create_subprocess_exec(
                 "ffmpeg", "-y", "-i", temp_input_path, 
-                "-f", "f32le", "-ac", "1", "-ar", "16000", "-",
+                "-ar", "16000", "-ac", "1", temp_audio_wav,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE
             )
@@ -368,18 +343,15 @@ class MindMicDaemon:
                 print(f"[HTTP] FFmpeg error: {stderr_data.decode()}")
                 return web.json_response({"error": "Failed to decode audio file"}, status=400)
             
-            # Map bytes directly into numpy array for ggml
-            audio_float32 = np.frombuffer(stdout_data, dtype=np.float32)
+            # Spawn the native C++ engine
+            proc = await asyncio.create_subprocess_exec(
+                TRANSCRIBE_CLI, "-m", MODEL_PATH, "-f", temp_audio_wav,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            stdout, stderr = await proc.communicate()
+            text = stdout.decode("utf-8")
             
-            def _run_inference_http() -> str:
-                return self._chunk_and_transcribe(audio_float32)
-
-            # Execute model on background thread to prevent blocking asyncio
-            loop = asyncio.get_running_loop()
-            raw_text = await loop.run_in_executor(None, _run_inference_http)
-            text = raw_text.strip()
-            
-            return web.json_response({"text": text})
+            return web.json_response({"text": text.strip()})
             
         except Exception as e:
             print(f"[HTTP] Transcribe endpoint error: {e}")
@@ -387,6 +359,8 @@ class MindMicDaemon:
         finally:
             if os.path.exists(temp_input_path):
                 os.remove(temp_input_path)
+            if os.path.exists(temp_audio_wav):
+                os.remove(temp_audio_wav)
 
     async def http_server(self) -> web.AppRunner:
         """
