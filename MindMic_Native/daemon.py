@@ -203,7 +203,8 @@ class MindMicDaemon:
                 audio_int16 = np.frombuffer(raw_bytes, dtype=np.int16)
                 audio_float32 = audio_int16.astype(np.float32) / 32768.0
                 with self.model.session() as session:
-                    return session.run(audio_float32)
+                    result = session.run(audio_float32)
+                    return result.text
 
             try:
                 loop = asyncio.get_running_loop()
