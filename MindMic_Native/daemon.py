@@ -3,19 +3,21 @@ import json
 import math
 import struct
 import subprocess
-import wave
 import os
 from typing import List, Optional, Dict, Any
 
 from dotenv import load_dotenv
-import httpx
+import pyaudio
+import numpy as np
+import transcribe_cpp
+import concurrent.futures
 import pyaudio
 
 # Load explicit environment
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 # --- SYSTEM DEFAULTS & GLOBALS ---
-WHISPER_URL: str = os.getenv("WHISPER_URL", "http://127.0.0.1:8000/transcribe")
+MODEL_PATH: str = os.getenv("MODEL_PATH", "parakeet.gguf")
 DAEMON_HOST: str = os.getenv("DAEMON_HOST", "127.0.0.1")
 WS_PORT: int = int(os.getenv("AGS_TCP_PORT", "8765"))
 CLI_PORT: int = int(os.getenv("CLI_TCP_PORT", "8766"))
@@ -47,6 +49,14 @@ class MindMicDaemon:
         self.audio: pyaudio.PyAudio = pyaudio.PyAudio()
         self.stream: Optional[pyaudio.Stream] = None
         self.frames: List[bytes] = []
+
+        try:
+            print(f"[Core] Loading GGUF model into VRAM from {MODEL_PATH}")
+            self.model = transcribe_cpp.Model(MODEL_PATH)
+            print("[Core] Model loaded successfully.")
+        except Exception as e:
+            print(f"[Core] Fatal error loading ggml model: {e}")
+            exit(1)
 
     async def broadcast_state(self) -> None:
         """
@@ -188,89 +198,73 @@ class MindMicDaemon:
             self.state = "transcribing"
             await self.broadcast_state()
 
-            # Compile standard WAV structure inside virtual temporary memory block 
-            temp_file: str = "/tmp/mindmic_buffer.wav"
-            with wave.open(temp_file, "wb") as wf:
-                wf.setnchannels(CHANNELS)
-                wf.setsampwidth(self.audio.get_sample_size(FORMAT))
-                wf.setframerate(RATE)
-                wf.writeframes(b"".join(self.frames))
+            def _run_inference() -> str:
+                raw_bytes = b"".join(self.frames)
+                audio_int16 = np.frombuffer(raw_bytes, dtype=np.int16)
+                audio_float32 = audio_int16.astype(np.float32) / 32768.0
+                with self.model.session() as session:
+                    return session.run(audio_float32)
 
-            # Transmit constructed audio toward Whisper APIs mapping against default options
-            async with httpx.AsyncClient() as client:
-                try:
-                    with open(temp_file, "rb") as f:
-                        files = {"file": ("audio.wav", f, "audio/wav")}
-                        data: Dict[str, str] = {
-                            "mode": "none",
-                            "language": "en",
-                            "quality": "balanced"
-                        }
-                        
-                        response: httpx.Response = await client.post(
-                            WHISPER_URL, files=files, data=data, timeout=30.0
+            try:
+                loop = asyncio.get_running_loop()
+                raw_text = await loop.run_in_executor(None, _run_inference)
+                text = raw_text.strip()
+                if text:
+                    # Small delay to ensure physical modifier keys (like SUPER) are released
+                    await asyncio.sleep(0.4)
+                    
+                    # Copy text to standard clipboard and primary selection
+                    try:
+                        # Copy to clipboard
+                        proc_clip = await asyncio.create_subprocess_exec(
+                            "wl-copy",
+                            stdin=subprocess.PIPE
                         )
+                        await proc_clip.communicate(input=text.encode("utf-8"))
                         
-                        # Upon successful HTTP fetch, invoke Wayland virtual keystroke inputs (wtype)
-                        if response.status_code == 200:
-                            resp_payload: Dict[str, Any] = response.json()
-                            text: str = resp_payload.get("text", "").strip()
-                            if text:
-                                # Small delay to ensure physical modifier keys (like SUPER) are released
-                                await asyncio.sleep(0.4)
-                                
-                                # Copy text to standard clipboard and primary selection
-                                try:
-                                    # Copy to clipboard
-                                    proc_clip = await asyncio.create_subprocess_exec(
-                                        "wl-copy",
-                                        stdin=subprocess.PIPE
-                                    )
-                                    await proc_clip.communicate(input=text.encode("utf-8"))
-                                    
-                                    # Copy to primary selection
-                                    proc_prim = await asyncio.create_subprocess_exec(
-                                        "wl-copy", "--primary",
-                                        stdin=subprocess.PIPE
-                                    )
-                                    await proc_prim.communicate(input=text.encode("utf-8"))
-                                except Exception as e:
-                                    print(f"[wl-clipboard] Error copying text: {e}")
-                                
-                                # Detect the active window class
-                                window_class = await self.get_active_window_class()
-                                
-                                # Choose the appropriate paste shortcut
-                                terminal_classes = {
-                                    "kitty", "alacritty", "foot", "wezterm", "konsole", 
-                                    "gnome-terminal", "xfce4-terminal", "urxvt", "xterm", 
-                                    "termite", "rio", "ghostty"
-                                }
-                                is_terminal = any(term in window_class for term in terminal_classes)
-                                
-                                # Simulate paste keypress
-                                try:
-                                    if is_terminal:
-                                        # Use Ctrl+Shift+V for terminals
-                                        proc_paste = await asyncio.create_subprocess_exec(
-                                            "wtype",
-                                            "-M", "ctrl", "-M", "shift",
-                                            "-k", "v",
-                                            "-m", "shift", "-m", "ctrl"
-                                        )
-                                    else:
-                                        # Use Ctrl+V for standard GUI applications
-                                        proc_paste = await asyncio.create_subprocess_exec(
-                                            "wtype",
-                                            "-M", "ctrl",
-                                            "-k", "v",
-                                            "-m", "ctrl"
-                                        )
-                                    await proc_paste.wait()
-                                except Exception as e:
-                                    print(f"[wtype] Failed to paste: {e}")
-                except Exception as e:
-                    print(f"[Network] Transcription process error context: {e}")
+                        # Copy to primary selection
+                        proc_prim = await asyncio.create_subprocess_exec(
+                            "wl-copy", "--primary",
+                            stdin=subprocess.PIPE
+                        )
+                        await proc_prim.communicate(input=text.encode("utf-8"))
+                    except Exception as e:
+                        print(f"[wl-clipboard] Error copying text: {e}")
+                    
+                    # Detect the active window class
+                    window_class = await self.get_active_window_class()
+                    
+                    # Choose the appropriate paste shortcut
+                    terminal_classes = {
+                        "kitty", "alacritty", "foot", "wezterm", "konsole", 
+                        "gnome-terminal", "xfce4-terminal", "urxvt", "xterm", 
+                        "termite", "rio", "ghostty"
+                    }
+                    is_terminal = any(term in window_class for term in terminal_classes)
+                    
+                    # Simulate paste keypress
+                    try:
+                        if is_terminal:
+                            # Use Ctrl+Shift+V for terminals
+                            proc_paste = await asyncio.create_subprocess_exec(
+                                "wtype",
+                                "-M", "ctrl", "-M", "shift",
+                                "-k", "v",
+                                "-m", "shift", "-m", "ctrl"
+                            )
+                        else:
+                            # Use Ctrl+V for standard GUI applications
+                            proc_paste = await asyncio.create_subprocess_exec(
+                                "wtype",
+                                "-M", "ctrl",
+                                "-k", "v",
+                                "-m", "ctrl"
+                            )
+                        await proc_paste.wait()
+                    except Exception as e:
+                        print(f"[wtype] Failed to paste: {e}")
+            except Exception as e:
+                print(f"[Core] Transcription process error context: {e}")
 
             # Restore pipeline closure back mapping to default standard
             self.state = "idle"
