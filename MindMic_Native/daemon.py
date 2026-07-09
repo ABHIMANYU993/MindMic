@@ -7,14 +7,14 @@ import os
 from typing import List, Optional, Dict, Any
 
 from dotenv import load_dotenv
+
+# Load explicit environment before any C++ bindings are imported
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+
 import pyaudio
 import numpy as np
 import transcribe_cpp
 import concurrent.futures
-import pyaudio
-
-# Load explicit environment
-load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 # --- SYSTEM DEFAULTS & GLOBALS ---
 MODEL_PATH: str = os.getenv("MODEL_PATH", "parakeet.gguf")
